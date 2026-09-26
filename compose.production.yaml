@@ -1,0 +1,40 @@
+name: mito
+
+services:
+  app:
+    volumes:
+      - app-uploads:/var/www/html/storage/app/public
+  worker:
+    volumes:
+      - app-uploads:/var/www/html/storage/app/public
+  outbound:
+    volumes:
+      - app-uploads:/var/www/html/storage/app/public
+  scheduler:
+    volumes:
+      - app-uploads:/var/www/html/storage/app/public
+  web:
+    volumes:
+      - app-uploads:/var/www/html/public/storage:ro
+  test:
+    profiles: [test]
+    build:
+      context: .
+      target: test
+    env_file: .env
+    environment:
+      APP_ENV: testing
+      DB_DATABASE: bot2_test
+      CACHE_STORE: array
+      QUEUE_CONNECTION: database
+      SESSION_DRIVER: array
+      MAIL_MAILER: array
+      TELEGRAM_BOT_TOKEN: ""
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  app-uploads:

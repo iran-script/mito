@@ -1,0 +1,7 @@
+@font-face { font-family: Vazirmatn; src: url('/fonts/vazirmatn/Vazirmatn-Variable.woff2') format('woff2'); font-weight: 100 900; font-style: normal; font-display: swap; }
+html[lang="fa"] { --font-family: Vazirmatn, Tahoma, sans-serif; }
+html[lang="fa"] body { font-family: Vazirmatn, Tahoma, sans-serif; line-height: 1.8; }
+html[dir="rtl"] :is(.fi-ta-header-cell, .fi-ta-text, .fi-fo-field-wrp-label, .fi-modal-heading) { text-align: start; }
+html[dir="rtl"] :is(input[type="email"], input[type="url"], input[type="number"], input[type="password"], input[type="datetime-local"]) { direction: ltr; text-align: start; }
+html[dir="rtl"] :is(.fi-ta-text-item, .fi-badge) { unicode-bidi: plaintext; }
+html[dir="rtl"] :is(.fi-modal-content, .fi-fo-field-wrp) { min-width: 0; }

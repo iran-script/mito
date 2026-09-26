@@ -1,0 +1,71 @@
+name: bot2
+x-app: &app
+  image: mito-app:mito-prod
+  env_file: .env
+  environment:
+    APP_ENV: production
+    APP_DEBUG: "false"
+    SESSION_DRIVER: database
+    # Loopback HTTP development endpoint; set true behind production HTTPS.
+    SESSION_SECURE_COOKIE: ${SESSION_SECURE_COOKIE:-false}
+    LOG_CHANNEL: stderr
+    DB_CONNECTION: pgsql
+    DB_HOST: postgres
+    DB_PORT: 5432
+    REDIS_HOST: redis
+    REDIS_PORT: 6379
+    REDIS_CLIENT: predis
+    CACHE_STORE: redis
+    QUEUE_CONNECTION: redis
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+services:
+  app:
+    <<: *app
+    build: .
+  worker:
+    <<: *app
+    command: ["php", "artisan", "queue:work", "database", "--queue=telegram", "--sleep=1", "--timeout=60", "--max-time=3600"]
+  outbound:
+    <<: *app
+    command: ["php", "artisan", "queue:work", "database", "--queue=telegram-outbound", "--sleep=1", "--timeout=30", "--max-time=3600"]
+  scheduler:
+    <<: *app
+    command: ["php", "artisan", "schedule:work"]
+  web:
+    build:
+      context: .
+      target: web
+    ports: ["127.0.0.1:8081:80"]
+    depends_on: [app]
+    restart: unless-stopped
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${DB_DATABASE:-bot2}
+      POSTGRES_USER: ${DB_USERNAME:-bot2}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: ["redis-data:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+volumes:
+  postgres-data:
+  redis-data:

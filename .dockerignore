@@ -1,0 +1,20 @@
+vendor
+node_modules
+.git
+/server.txt
+.env
+.env.*
+!.env.example
+storage/logs/*
+storage/framework/cache/data/*
+storage/framework/views/*
+bootstrap/cache/*.php
+database/*.sqlite*
+.phpunit.result.cache
+
+# Local verification evidence is not runtime application content.
+storage/*-junit.xml
+storage/*-docker.iid
+
+# Local localization audit and verification artifacts.
+storage/localization-*

@@ -1,0 +1,104 @@
+# File inventory
+
+The workspace was empty before implementation. The source/configuration/documentation files below were created (including the Laravel scaffold); there were no pre-existing application files to modify. Phase 2 adds the `app/Domain/Discovery` services, location/block schema support, Telegram discovery interaction, discovery tests and this phase documentation.
+
+The default Laravel user migration, model/factory, seeder, application provider, API routing/bootstrap, database defaults, Composer requirements and PHPUnit configuration were adapted for the Telegram/PostgreSQL foundation. Unused Laravel scaffold assets remain intact.
+
+- `.dockerignore`
+- `.editorconfig`
+- `.env.example`
+- `.gitattributes`
+- `.github/workflows/tests.yml`
+- `.gitignore`
+- `Dockerfile`
+- `README.md`
+- `app/Domain/Profiles/Actions/AdvanceRegistration.php`
+- `app/Domain/Profiles/City.php`
+- `app/Domain/Profiles/Gender.php`
+- `app/Domain/Profiles/Interest.php`
+- `app/Domain/Profiles/Profile.php`
+- `app/Domain/Profiles/ProfilePolicy.php`
+- `app/Domain/Profiles/ProfileStatus.php`
+- `app/Domain/Profiles/Province.php`
+- `app/Domain/Profiles/PublicProfile.php`
+- `app/Domain/Profiles/RegistrationInput.php`
+- `app/Domain/Profiles/RegistrationState.php`
+- `app/Domain/Profiles/RegistrationStep.php`
+- `app/Domain/Telegram/Actions/AcceptUpdate.php`
+- `app/Domain/Telegram/Http/WebhookController.php`
+- `app/Domain/Telegram/Http/WebhookRequest.php`
+- `app/Domain/Telegram/HttpTelegramClient.php`
+- `app/Domain/Telegram/IncomingUpdate.php`
+- `app/Domain/Telegram/Jobs/DeliverMessage.php`
+- `app/Domain/Telegram/Jobs/ProcessUpdate.php`
+- `app/Domain/Telegram/RegistrationPresenter.php`
+- `app/Domain/Telegram/TelegramClient.php`
+- `app/Domain/Users/User.php`
+- `app/Domain/Users/UserStatus.php`
+- `app/Http/Controllers/Controller.php`
+- `app/Models/User.php`
+- `app/Providers/AppServiceProvider.php`
+- `artisan`
+- `bootstrap/app.php`
+- `bootstrap/cache/.gitignore`
+- `bootstrap/providers.php`
+- `compose.yaml`
+- `composer.json`
+- `composer.lock`
+- `config/app.php`
+- `config/auth.php`
+- `config/cache.php`
+- `config/database.php`
+- `config/filesystems.php`
+- `config/logging.php`
+- `config/mail.php`
+- `config/queue.php`
+- `config/services.php`
+- `config/session.php`
+- `config/telegram.php`
+- `database/.gitignore`
+- `database/factories/UserFactory.php`
+- `database/migrations/0001_01_01_000000_create_users_table.php`
+- `database/migrations/0001_01_01_000001_create_cache_table.php`
+- `database/migrations/0001_01_01_000002_create_jobs_table.php`
+- `database/migrations/2026_09_17_000001_create_profiles.php`
+- `database/migrations/2026_09_17_000002_create_telegram_tables.php`
+- `database/seeders/DatabaseSeeder.php`
+- `docker/nginx.conf`
+- `docs/FILES.md`
+- `docs/VERIFICATION.md`
+- `package.json`
+- `phpunit.xml`
+- `public/.htaccess`
+- `public/favicon.ico`
+- `public/index.php`
+- `public/robots.txt`
+- `resources/css/app.css`
+- `resources/js/app.js`
+- `resources/js/bootstrap.js`
+- `resources/views/welcome.blade.php`
+- `routes/api.php`
+- `routes/console.php`
+- `routes/web.php`
+- `storage/app/.gitignore`
+- `storage/app/private/.gitignore`
+- `storage/app/public/.gitignore`
+- `storage/framework/.gitignore`
+- `storage/framework/cache/.gitignore`
+- `storage/framework/cache/data/.gitignore`
+- `storage/framework/sessions/.gitignore`
+- `storage/framework/testing/.gitignore`
+- `storage/framework/views/.gitignore`
+- `storage/logs/.gitignore`
+- `tests/Fakes/FakeTelegramClient.php`
+- `tests/Feature/ExampleTest.php`
+- `tests/Feature/PersistenceTest.php`
+- `tests/Feature/RegistrationTest.php`
+- `tests/Feature/TelegramClientTest.php`
+- `tests/TestCase.php`
+- `tests/Unit/ExampleTest.php`
+- `vite.config.js`
+
+Generated local artifacts: `.env` (local configuration and generated APP_KEY; ignored), `vendor/` (Composer dependencies), `bootstrap/cache/` package manifests, `storage/` runtime logs/views/cache and `.phpunit.result.cache`. These are generated runtime/dependency outputs, not source changes. Composer briefly created the default SQLite scaffold database; it was removed after switching to PostgreSQL, and no SQLite database is used by the implementation or tests.
+
+External verification resources: isolated Docker containers `bot2-postgres` and `bot2-redis`, PostgreSQL databases `bot2` and `bot2_test`, and image `bot2-app:local`. No real Telegram webhook or hosted deployment was created.
