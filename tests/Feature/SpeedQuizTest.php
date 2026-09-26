@@ -25,6 +25,7 @@ class SpeedQuizTest extends TestCase
     {
         parent::setUp();
         $this->seed();
+        DB::table('coin_feature_prices')->where('feature_code', 'game_invitation')->update(['coin_cost' => 0]);
         $this->city = City::first();
     }
 

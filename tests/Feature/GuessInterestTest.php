@@ -28,6 +28,7 @@ class GuessInterestTest extends TestCase
     {
         parent::setUp();
         $this->bootGameTests();
+        DB::table('coin_feature_prices')->where('feature_code', 'game_invitation')->update(['coin_cost' => 0]);
         $this->service = app(GuessInterestService::class);
     }
 

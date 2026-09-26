@@ -22,6 +22,7 @@ use App\Filament\Support\AdminActions;
 use App\Support\Presentation;
 use Filament\Facades\Filament;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\Concerns\InteractsWithGuessGames;
@@ -35,6 +36,7 @@ class PersianLocalizationTest extends TestCase
     {
         parent::setUp();
         $this->bootGameTests();
+        DB::table('coin_feature_prices')->where('feature_code', 'game_invitation')->update(['coin_cost' => 0]);
         app()->setLocale('fa');
     }
 

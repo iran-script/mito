@@ -89,6 +89,7 @@ class Phase8Test extends TestCase
         parent::setUp();
         Http::preventStrayRequests();
         $this->seed();
+        DB::table('coin_feature_prices')->where('feature_code', 'game_invitation')->update(['coin_cost' => 0]);
         $this->admin = $this->admin();
         Filament::setCurrentPanel(Filament::getPanel('admin'));
     }

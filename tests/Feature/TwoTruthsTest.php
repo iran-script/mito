@@ -38,6 +38,7 @@ class TwoTruthsTest extends TestCase
     {
         parent::setUp();
         $this->seed();
+        DB::table('coin_feature_prices')->where('feature_code', 'game_invitation')->update(['coin_cost' => 0]);
         $this->service = app(TwoTruthsService::class);
         $this->telegram = new FakeTelegramClient;
         $this->app->instance(TelegramClient::class, $this->telegram);

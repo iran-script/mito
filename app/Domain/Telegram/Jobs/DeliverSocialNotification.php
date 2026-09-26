@@ -36,7 +36,7 @@ class DeliverSocialNotification implements ShouldQueue
             if (! $row || $row->sent_at) {
                 return;
             }
-            if (in_array($row->source_type, ['two_truths', 'guess_interest', 'guess_number', 'game_invite', 'game_turn', 'game_result', 'game_mutual'], true)) {
+            if (in_array($row->source_type, ['two_truths', 'guess_interest', 'guess_number', 'game_invite', 'game_accepted', 'game_started', 'game_turn', 'game_result', 'game_mutual'], true)) {
                 $session = GameSession::find($row->source_id);
                 $players = $session?->participants()->get();
                 if (! $session || $players->count() !== 2 || $players->contains(fn ($p) => $p->status !== UserStatus::Active) || in_array($session->status, [GameStatus::Cancelled, GameStatus::Expired], true) || ($session->status !== GameStatus::Completed && $session->expires_at?->isPast()) || app(BlockService::class)->isBlocked($players[0], $players[1])) {

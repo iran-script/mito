@@ -166,7 +166,8 @@ class DirectMatchmakingSearchUxTest extends TestCase
             'from' => ['id' => $viewer->telegram_user_id, 'is_bot' => false, 'first_name' => 'Test'],
             'message' => ['message_id' => 2, 'chat' => ['id' => $viewer->telegram_user_id, 'type' => 'private']],
         ]]), $state);
-        $this->assertStringContainsString($targets->first()->profile->display_name, json_encode($profile, JSON_UNESCAPED_UNICODE));
+        $selectedId = (int) explode('_', $profileButtons[0]['callback_data'])[1];
+        $this->assertStringContainsString($targets->firstWhere('id', $selectedId)->profile->display_name, json_encode($profile, JSON_UNESCAPED_UNICODE));
     }
 
     public function test_test_credit_is_flagged_ledger_backed_and_idempotent_per_update(): void

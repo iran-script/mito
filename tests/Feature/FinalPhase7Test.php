@@ -45,6 +45,7 @@ class FinalPhase7Test extends TestCase
     {
         parent::setUp();
         $this->bootGameTests();
+        DB::table('coin_feature_prices')->where('feature_code', 'game_invitation')->update(['coin_cost' => 0]);
     }
 
     private function type(): GameType
@@ -739,15 +740,15 @@ class FinalPhase7Test extends TestCase
         $b = $this->user('B');
         $c = $this->user('C');
         app(ContactService::class)->add($a, $b);
-        $this->send($a, 'd:0:game_type_contacts_guess_number');
+        $this->send($a, 'd:0:game_type_contacts_rock_paper_scissors');
         $last = collect($this->telegram->sent)->filter(fn ($m) => isset($m['parameters']['text']))->last();
         $keyboard = json_encode($last['parameters']['reply_markup']);
-        $this->assertStringContainsString('profile_'.$b->id.'_game_pick_contacts_guess_number_1', $keyboard);
-        $this->assertStringNotContainsString('profile_'.$c->id.'_game_pick_contacts_guess_number_1', $keyboard);
-        $this->send($a, 'd:0:game_type_opponent_guess_number');
+        $this->assertStringContainsString('profile_'.$b->id.'_game_pick_contacts_rock_paper_scissors_1', $keyboard);
+        $this->assertStringNotContainsString('profile_'.$c->id.'_game_pick_contacts_rock_paper_scissors_1', $keyboard);
+        $this->send($a, 'd:0:game_type_opponent_rock_paper_scissors');
         $before = collect($this->telegram->sent)->filter(fn ($m) => isset($m['parameters']['text']))->last()['parameters']['reply_markup'];
         app(GoldMembershipService::class)->activate($c, now()->addDay(), 'test');
-        $this->send($a, 'd:0:game_type_opponent_guess_number');
+        $this->send($a, 'd:0:game_type_opponent_rock_paper_scissors');
         $after = collect($this->telegram->sent)->filter(fn ($m) => isset($m['parameters']['text']))->last()['parameters']['reply_markup'];
         $this->assertSame(array_column(array_merge(...$before['inline_keyboard']), 'text'), array_column(array_merge(...$after['inline_keyboard']), 'text'));
         $this->assertPrivateMessages($a, $b, $c);

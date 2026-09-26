@@ -257,3 +257,26 @@ The real HTTP authentication suite against nginx/PHP-FPM with cached production 
 The pre-commit `php artisan test` run passed **409 tests / 6,488 assertions**, with zero failures. `php vendor/bin/pint --test` and `composer validate --strict` passed. Windows PHP used an isolated, temporary intl scan configuration inherited by the test subprocesses. No expensive Docker rebuild was needed for this Git-only preparation.
 
 The Git candidate files were checked for local secret values and common credential patterns. Runtime storage, logs, caches, sessions, dependencies, local environments, keys/certificates and temporary verification artifacts are excluded. `.env.example` contains placeholders only; CI uses a temporary generated database password. This milestone remains before production payments and deployment hardening.
+
+## Interaction recovery validation - 2026-09-26
+
+Resumed the committed WIP at `62789a913881d012d4cbea02a4c50ef751055d01` on `main`, confirmed equal to freshly fetched `origin/main`. The initial working tree was clean. Recovery was retained rather than reimplemented.
+
+Validation fixes:
+- Applied Pint to the recovery WIP and corrected its wallet and stale-callback fixtures.
+- Added a savepoint around interaction processing so unexpected failures roll back partial changes before fallback recovery. Incomplete registration keeps its existing rollback/retry behavior. A new regression verifies wallet/profile preservation.
+- Applied the existing cancelled/blocked-game delivery guard to acceptance/start notifications.
+- Made zero invitation pricing explicit in legacy free-game suites; the dedicated paid-economy tests retain default pricing. Corrected stale game-picker/search-order assertions.
+- Restored application-owned Persian Filament accessibility/count translations missing from the checkout.
+- Excluded local verification artifacts from the Docker context.
+
+Results:
+- Pint and `composer validate --strict`: passed.
+- Focused recovery, blocked-game delivery, and paid-economy regressions: **10 tests / 84 assertions**, passed (`storage/verification/recovery-focused-final.xml`).
+- Full suite: **477 tests / 8,159 assertions**, no failures/errors, 735.555 seconds (`storage/verification/recovery-full-final.xml`, `storage/logs/recovery-full-final-tests.log`). Host PHP 8.4.25 with a workspace-only intl configuration; isolated PostgreSQL 17 `bot2_test` database.
+- Production runtime image: `mito-app:recovery-62789a9`, ID recorded in `storage/verification/recovery-runtime.iid`.
+- Nginx image: `mito-web:recovery-62789a9`, ID recorded in `storage/verification/recovery-web.iid`.
+- Both builds passed. Docker's DNS forwarder failed, so build-only host mappings used addresses resolved by Windows; the Dockerfile and system DNS were unchanged. Build logs are under `storage/logs/recovery-*-build.log`.
+- Network-disabled smoke checks passed: PHP 8.3.35 / Laravel 12.69.2 / production / debug off, PHP-FPM configuration, production Composer platform requirements, nginx configuration, and packaged Filament/Persian assets. The runtime contains the Persian overrides and excludes `.env` and local verification artifacts.
+
+No production backup or deployment was performed: the deployment server/SSH alias and application directory were not provided. Backup must be taken and verified before deployment. Changes remain uncommitted for review. The local testing-only `.env` targets the disposable `mito-recovery-test-db` container, not production.
