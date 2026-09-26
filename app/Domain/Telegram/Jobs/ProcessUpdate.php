@@ -16,6 +16,7 @@ use App\Domain\Telegram\InteractionStateResolver;
 use App\Domain\Telegram\Keyboard;
 use App\Domain\Telegram\RegistrationPresenter;
 use App\Domain\Telegram\SocialInteraction;
+use App\Domain\Telegram\TelegramFailure;
 use App\Domain\Users\MitoId;
 use App\Domain\Users\User;
 use App\Domain\Users\UserStatus;
@@ -46,148 +47,242 @@ class ProcessUpdate implements ShouldQueue
         $discovery ??= app(DiscoveryInteraction::class);
         $locations ??= app(LocationService::class);
         $social ??= app(SocialInteraction::class);
-        DB::transaction(function () use ($registration, $presenter, $discovery, $locations, $social) {
-            $envelope = DB::table('telegram_updates')->where('update_id', $this->updateId)->first();
-            if (! $envelope || $envelope->processed_at) {
-                return;
-            }
-            // Serialize new-user creation and all incoming updates for this sender.
-            DB::select('SELECT pg_advisory_xact_lock(?)', [$envelope->telegram_user_id]);
-            $pending = DB::table('telegram_updates')->where('telegram_user_id', $envelope->telegram_user_id)->whereNull('processed_at')->orderBy('update_id')->limit(100)->lockForUpdate()->get();
-            foreach ($pending as $row) {
-                $update = new IncomingUpdate(json_decode(Crypt::decryptString($row->payload), true, 512, JSON_THROW_ON_ERROR));
-                $sender = $update->sender();
-                $user = User::firstOrCreate(['telegram_user_id' => $update->userId()]);
-                $user = User::whereKey($user->id)->lockForUpdate()->firstOrFail();
-                $user->fill([
-                    'telegram_username' => $sender['username'] ?? null, 'telegram_first_name' => $sender['first_name'],
-                    'telegram_last_name' => $sender['last_name'] ?? null, 'telegram_language_code' => $sender['language_code'] ?? null,
-                    'is_bot' => $sender['is_bot'], 'last_activity_at' => now(),
-                ])->save();
-                $messages = [];
-                if ($update->callbackId()) {
-                    $messages[] = ['method' => 'answerCallbackQuery', 'parameters' => ['callback_query_id' => $update->callbackId()]];
-                }
-                if ($user->status !== UserStatus::Active) {
-                    $messages[] = ['method' => 'sendMessage', 'parameters' => ['text' => __('Your account is unavailable.')]];
-                } else {
-                    DB::beginTransaction();
-                    try {
-                        $profile = Profile::firstOrCreate(['user_id' => $user->id]);
-                        $state = RegistrationState::firstOrCreate(['user_id' => $user->id]);
-                        $interaction = InteractionState::firstOrCreate(['user_id' => $user->id]);
-                        $input = $update->input(null);
-                        $isStart = $update->callback() === null && str_starts_with(Presentation::input(trim($input->text ?? '')), '/start');
-                        $recovery = app(InteractionStateResolver::class)->resolve($user, $interaction);
-                        $replyText = trim($input->text ?? '');
-                        $homeAction = $update->callback() === null ? Keyboard::homeAction($replyText) : null;
-                        $searchAction = $update->callback() === null ? Keyboard::searchAction($replyText, $interaction->mode) : null;
-                        $eventAction = $update->callback() === null && $interaction->mode === 'event_create'
-                            ? Keyboard::eventAction($replyText, $interaction->event_context ?? []) : null;
-                        $error = null;
-                        $choice = null;
-                        $registrationCompleted = false;
-                        if ($update->callback() !== null && str_starts_with($update->callback(), 'r:')) {
-                            [, $revision, $choice] = explode(':', $update->callback(), 3);
-                            $error = (int) $revision !== $state->revision ? __('This button has expired. Use the latest buttons below.') : $registration->execute($user, $profile, $state, $update->input($choice));
-                            $registrationCompleted = $profile->status === ProfileStatus::Active;
-                        } elseif ($profile->status === ProfileStatus::Active && Presentation::input(trim($input->text ?? '')) === '/start') {
-                            $interaction->resetNavigation();
-                            DB::table('matchmaking_searches')->where('user_id', $user->id)->where('status', 'waiting')
-                                ->update(['status' => 'cancelled', 'updated_at' => now()]);
-                            $messages = array_merge($messages, $discovery->menu($state));
-                        } elseif ($profile->status === ProfileStatus::Active && $update->callback() === null && MitoId::looksLike($replyText)) {
-                            $messages = array_merge($messages, $discovery->lookupProfile($user, $replyText, $state));
-                        } elseif ($profile->status === ProfileStatus::Active && $homeAction !== null) {
-                            $interaction->resetNavigation();
-                            DB::table('matchmaking_searches')->where('user_id', $user->id)->where('status', 'waiting')
-                                ->update(['status' => 'cancelled', 'updated_at' => now()]);
-                            [$scope, $action] = $homeAction;
-                            $replyUpdate = $update->asAction($scope, $scope === 's' ? $interaction->revision : $state->revision, $action);
-                            $messages = array_merge($messages, $scope === 's'
-                                ? $social->handle($user, $replyUpdate, $interaction)
-                                : $discovery->handle($user, $replyUpdate, $state));
-                        } elseif ($profile->status === ProfileStatus::Active && $searchAction !== null) {
-                            $messages = array_merge($messages, $discovery->handle(
-                                $user, $update->asAction('d', $state->revision, $searchAction), $state,
-                            ));
-                        } elseif ($profile->status === ProfileStatus::Active && $eventAction !== null) {
-                            $messages = array_merge($messages, $discovery->handle(
-                                $user, $update->asAction('d', $state->revision, $eventAction), $state,
-                            ));
-                        } elseif ($profile->status === ProfileStatus::Active && $update->callback() === null
-                            && $replyText === __('Back') && in_array($interaction->mode, ['chat', 'direct', 'direct_compose', 'direct_review'], true)) {
-                            $messages = array_merge($messages, $social->handle(
-                                $user, $update->asAction('s', $interaction->revision, 'back'), $interaction,
-                            ));
-                        } elseif ($update->location()) {
-                            $locations->update($user, (float) $update->location()['latitude'], (float) $update->location()['longitude']);
-                            $messages[] = ['method' => 'sendMessage', 'parameters' => ['text' => __('Your location was updated. Exact coordinates stay private.')]];
-                        } elseif ($profile->status === ProfileStatus::Active && preg_match('/^d:[0-9]+:(?:game_|games$)/', $update->callback() ?? '')) {
-                            // A game notification must remain actionable while another chat is open.
-                            $messages = array_merge($messages, $discovery->handle($user, $update, $state));
-                        } elseif ($profile->status === ProfileStatus::Active && ($update->callback() !== null && (str_starts_with($update->callback(), 's:') || str_starts_with($update->callback(), 'n:')) || Presentation::input(trim($input->text ?? '')) === 'Chats' || in_array($interaction->mode, ['chat', 'direct', 'direct_compose', 'direct_review', 'request_review'], true))) {
-                            $messages = array_merge($messages, $social->handle($user, $update, $interaction));
-                            $interaction->increment('revision');
-                        } elseif ($profile->status === ProfileStatus::Active) {
-                            $messages = array_merge($messages, $discovery->handle($user, $update, $state));
-                        } else {
-                            $replyChoice = $update->callback() === null
-                                ? Keyboard::registrationChoice(trim($input->text ?? ''), $state)
-                                : null;
-                            $registrationInput = $replyChoice === null ? $input : new RegistrationInput(
-                                $input->text, $replyChoice, $input->photo, $input->voice, $input->voiceDuration,
-                            );
-                            $error = $registration->execute($user, $profile, $state, $registrationInput);
-                            $registrationCompleted = $profile->status === ProfileStatus::Active;
-                        }
-                        $state->revision++;
-                        $state->save();
-                        $interaction->revision = $state->revision;
-                        $interaction->save();
-                        if (($recovery['recovered'] ?? false) && ! $isStart) {
-                            array_unshift($messages, ['method' => 'sendMessage', 'parameters' => ['text' => __('Your previous step expired. You are back at the main menu.')]]);
-                        }
-                        if ($profile->status !== ProfileStatus::Active && ! $update->location()) {
-                            $messages = array_merge($messages, $presenter->messages($profile->fresh(), $state, $error));
-                        }
-                        if ($update->location()) {
-                            $messages = array_merge($messages, $discovery->menu($state));
-                        }
-                        if ($registrationCompleted) {
-                            $messages = array_merge($messages, $discovery->menu($state));
-                        }
-                        DB::commit();
-                    } catch (\DomainException $e) {
-                        DB::commit();
-                        $messages[] = ['method' => 'sendMessage', 'parameters' => ['text' => Presentation::error($e->getMessage())]];
-                    } catch (\Throwable $e) {
-                        DB::rollBack();
-                        if ($user->profile()->first()?->status !== ProfileStatus::Active) {
-                            throw $e;
-                        }
-                        $interaction = InteractionState::firstOrCreate(['user_id' => $user->id]);
-                        Log::error('telegram_update_exception', ['update_id' => $row->update_id, 'user_id' => $user->id, 'state' => $interaction->mode ?? null, 'exception' => $e]);
-                        app(InteractionStateResolver::class)->recover($user, $interaction);
-                        $active = app(ConversationService::class)->activeFor($user);
-                        $messages = [['method' => 'sendMessage', 'parameters' => ['text' => __('Something went wrong. I returned you to the safe menu; please try again.'), 'reply_markup' => ['keyboard' => $active ? Keyboard::chatReply($active->is_protected) : Keyboard::homeReply(), 'resize_keyboard' => true, 'is_persistent' => true]]]];
+        $envelope = DB::table('telegram_updates')->where('update_id', $this->updateId)->first();
+        if (! $envelope || $envelope->processed_at || $envelope->failed_at) {
+            return;
+        }
+        $pending = DB::table('telegram_updates')->where('telegram_user_id', $envelope->telegram_user_id)
+            ->whereNull('processed_at')->whereNull('failed_at')->orderBy('update_id')->limit(100)->pluck('update_id');
+        $retryError = null;
+        foreach ($pending as $updateId) {
+            try {
+                // Commit each update independently: a later failure cannot undo earlier work.
+                DB::transaction(function () use ($updateId, $envelope, $registration, $presenter, $discovery, $locations, $social) {
+                    DB::select('SELECT pg_advisory_xact_lock(?)', [$envelope->telegram_user_id]);
+                    $row = DB::table('telegram_updates')->where('update_id', $updateId)->lockForUpdate()->first();
+                    if (! $row || $row->processed_at || $row->failed_at) {
+                        return;
                     }
-                }
-                foreach ($messages as $sequence => $message) {
-                    if ($message['method'] !== 'answerCallbackQuery') {
-                        $message['parameters']['chat_id'] = $update->userId();
-                    }
-                    Keyboard::assertValidPayload($message);
-                    $id = DB::table('telegram_outbox')->insertGetId([
-                        'update_id' => $row->update_id, 'sequence' => $sequence,
-                        'payload' => Crypt::encryptString(json_encode($message, JSON_THROW_ON_ERROR)),
-                        'created_at' => now(), 'updated_at' => now(),
+                    DB::table('telegram_updates')->where('update_id', $updateId)->update([
+                        'status' => 'processing', 'attempt_count' => $row->attempt_count + 1, 'updated_at' => now(),
                     ]);
-                    DeliverMessage::dispatch($id)->onConnection('database')->onQueue('telegram-outbound');
+                    $terminalError = null;
+                    $update = new IncomingUpdate(json_decode(Crypt::decryptString($row->payload), true, 512, JSON_THROW_ON_ERROR));
+                    $sender = $update->sender();
+                    $user = User::firstOrCreate(['telegram_user_id' => $update->userId()]);
+                    $user = User::whereKey($user->id)->lockForUpdate()->firstOrFail();
+                    $user->fill([
+                        'telegram_username' => $sender['username'] ?? null, 'telegram_first_name' => $sender['first_name'],
+                        'telegram_last_name' => $sender['last_name'] ?? null, 'telegram_language_code' => $sender['language_code'] ?? null,
+                        'is_bot' => $sender['is_bot'], 'last_activity_at' => now(),
+                    ])->save();
+                    $messages = [];
+                    if ($update->callbackId()) {
+                        $messages[] = ['method' => 'answerCallbackQuery', 'parameters' => ['callback_query_id' => $update->callbackId()]];
+                    }
+                    if ($user->status !== UserStatus::Active) {
+                        $messages[] = ['method' => 'sendMessage', 'parameters' => ['text' => __('Your account is unavailable.')]];
+                    } else {
+                        $domainLevel = DB::transactionLevel();
+                        DB::beginTransaction();
+                        try {
+                            $profile = Profile::firstOrCreate(['user_id' => $user->id]);
+                            $state = RegistrationState::firstOrCreate(['user_id' => $user->id]);
+                            $interaction = InteractionState::firstOrCreate(['user_id' => $user->id]);
+                            $input = $update->input(null);
+                            $isStart = $update->callback() === null && str_starts_with(Presentation::input(trim($input->text ?? '')), '/start');
+                            $recovery = app(InteractionStateResolver::class)->resolve($user, $interaction);
+                            $replyText = trim($input->text ?? '');
+                            $homeAction = $update->callback() === null ? Keyboard::homeAction($replyText) : null;
+                            $searchAction = $update->callback() === null ? Keyboard::searchAction($replyText, $interaction->mode) : null;
+                            $eventAction = $update->callback() === null && $interaction->mode === 'event_create'
+                                ? Keyboard::eventAction($replyText, $interaction->event_context ?? []) : null;
+                            $error = null;
+                            $choice = null;
+                            $registrationCompleted = false;
+                            if ($update->callback() !== null && str_starts_with($update->callback(), 'r:')) {
+                                [, $revision, $choice] = explode(':', $update->callback(), 3);
+                                $error = (int) $revision !== $state->revision ? __('This button has expired. Use the latest buttons below.') : $registration->execute($user, $profile, $state, $update->input($choice));
+                                $registrationCompleted = $profile->status === ProfileStatus::Active;
+                            } elseif ($profile->status === ProfileStatus::Active && Presentation::input(trim($input->text ?? '')) === '/start') {
+                                $interaction->resetNavigation();
+                                DB::table('matchmaking_searches')->where('user_id', $user->id)->where('status', 'waiting')
+                                    ->update(['status' => 'cancelled', 'updated_at' => now()]);
+                                $messages = array_merge($messages, $discovery->menu($state));
+                            } elseif ($profile->status === ProfileStatus::Active && $update->callback() === null && MitoId::looksLike($replyText)) {
+                                $messages = array_merge($messages, $discovery->lookupProfile($user, $replyText, $state));
+                            } elseif ($profile->status === ProfileStatus::Active && $homeAction !== null) {
+                                $interaction->resetNavigation();
+                                DB::table('matchmaking_searches')->where('user_id', $user->id)->where('status', 'waiting')
+                                    ->update(['status' => 'cancelled', 'updated_at' => now()]);
+                                [$scope, $action] = $homeAction;
+                                $replyUpdate = $update->asAction($scope, $scope === 's' ? $interaction->revision : $state->revision, $action);
+                                $messages = array_merge($messages, $scope === 's'
+                                    ? $social->handle($user, $replyUpdate, $interaction)
+                                    : $discovery->handle($user, $replyUpdate, $state));
+                            } elseif ($profile->status === ProfileStatus::Active && $searchAction !== null) {
+                                $messages = array_merge($messages, $discovery->handle(
+                                    $user, $update->asAction('d', $state->revision, $searchAction), $state,
+                                ));
+                            } elseif ($profile->status === ProfileStatus::Active && $eventAction !== null) {
+                                $messages = array_merge($messages, $discovery->handle(
+                                    $user, $update->asAction('d', $state->revision, $eventAction), $state,
+                                ));
+                            } elseif ($profile->status === ProfileStatus::Active && $update->callback() === null
+                                && $replyText === __('Back') && in_array($interaction->mode, ['chat', 'direct', 'direct_compose', 'direct_review'], true)) {
+                                $messages = array_merge($messages, $social->handle(
+                                    $user, $update->asAction('s', $interaction->revision, 'back'), $interaction,
+                                ));
+                            } elseif ($update->location()) {
+                                $locations->update($user, (float) $update->location()['latitude'], (float) $update->location()['longitude']);
+                                $messages[] = ['method' => 'sendMessage', 'parameters' => ['text' => __('Your location was updated. Exact coordinates stay private.')]];
+                            } elseif ($profile->status === ProfileStatus::Active && preg_match('/^d:[0-9]+:(?:game_|games$)/', $update->callback() ?? '')) {
+                                // A game notification must remain actionable while another chat is open.
+                                $messages = array_merge($messages, $discovery->handle($user, $update, $state));
+                            } elseif ($profile->status === ProfileStatus::Active && ($update->callback() !== null && (str_starts_with($update->callback(), 's:') || str_starts_with($update->callback(), 'n:')) || Presentation::input(trim($input->text ?? '')) === 'Chats' || in_array($interaction->mode, ['chat', 'direct', 'direct_compose', 'direct_review', 'request_review'], true))) {
+                                $messages = array_merge($messages, $social->handle($user, $update, $interaction));
+                                $interaction->increment('revision');
+                            } elseif ($profile->status === ProfileStatus::Active) {
+                                $messages = array_merge($messages, $discovery->handle($user, $update, $state));
+                            } else {
+                                $replyChoice = $update->callback() === null
+                                    ? Keyboard::registrationChoice(trim($input->text ?? ''), $state)
+                                    : null;
+                                $registrationInput = $replyChoice === null ? $input : new RegistrationInput(
+                                    $input->text, $replyChoice, $input->photo, $input->voice, $input->voiceDuration,
+                                );
+                                $error = $registration->execute($user, $profile, $state, $registrationInput);
+                                $registrationCompleted = $profile->status === ProfileStatus::Active;
+                            }
+                            $state->revision++;
+                            $state->save();
+                            $interaction->revision = $state->revision;
+                            $interaction->save();
+                            if (($recovery['recovered'] ?? false) && ! $isStart) {
+                                array_unshift($messages, ['method' => 'sendMessage', 'parameters' => ['text' => __('Your previous step expired. You are back at the main menu.')]]);
+                            }
+                            if ($profile->status !== ProfileStatus::Active && ! $update->location()) {
+                                $messages = array_merge($messages, $presenter->messages($profile->fresh(), $state, $error));
+                            }
+                            if ($update->location()) {
+                                $messages = array_merge($messages, $discovery->menu($state));
+                            }
+                            if ($registrationCompleted) {
+                                $messages = array_merge($messages, $discovery->menu($state));
+                            }
+                            DB::commit();
+                        } catch (\DomainException $e) {
+                            DB::rollBack($domainLevel);
+                            $messages[] = ['method' => 'sendMessage', 'parameters' => ['text' => Presentation::error($e->getMessage())]];
+                        } catch (\Throwable $e) {
+                            DB::rollBack($domainLevel);
+                            if ($user->profile()->first()?->status !== ProfileStatus::Active) {
+                                throw $e;
+                            }
+                            $interaction = InteractionState::firstOrCreate(['user_id' => $user->id]);
+                            Log::error('telegram_update_exception', ['update_id' => $row->update_id, 'user_id' => $user->id, 'state' => $interaction->mode ?? null] + TelegramFailure::context($e));
+                            $terminalError = $e;
+                            app(InteractionStateResolver::class)->recover($user, $interaction);
+                            $active = app(ConversationService::class)->activeFor($user);
+                            $messages = [['method' => 'sendMessage', 'parameters' => ['text' => __('Something went wrong. I returned you to the safe menu; please try again.'), 'reply_markup' => ['keyboard' => $active ? Keyboard::chatReply($active->is_protected) : Keyboard::homeReply(), 'resize_keyboard' => true, 'is_persistent' => true]]]];
+                            if ($update->callbackId()) {
+                                array_unshift($messages, ['method' => 'answerCallbackQuery', 'parameters' => ['callback_query_id' => $update->callbackId()]]);
+                            }
+                        }
+                    }
+                    foreach ($messages as $sequence => $message) {
+                        if ($message['method'] !== 'answerCallbackQuery') {
+                            $message['parameters']['chat_id'] = $update->userId();
+                        }
+                        Keyboard::assertValidPayload($message);
+                        $id = DB::table('telegram_outbox')->insertGetId([
+                            'update_id' => $row->update_id, 'sequence' => $sequence,
+                            'payload' => Crypt::encryptString(json_encode($message, JSON_THROW_ON_ERROR)),
+                            'created_at' => now(), 'updated_at' => now(),
+                        ]);
+                        DeliverMessage::dispatch($id)->onConnection('database')->onQueue('telegram-outbound');
+                    }
+                    // Retain only the deduplication key and operational metadata.
+                    DB::table('telegram_updates')->where('update_id', $row->update_id)->update(['payload' => null, 'processed_at' => now(), 'status' => $terminalError ? 'failed' : 'processed', 'failed_at' => $terminalError ? now() : null, 'last_error_class' => $terminalError ? get_class($terminalError) : null, 'updated_at' => now()]);
+                }, 3);
+            } catch (\Throwable $error) {
+                $terminal = $this->recordFailure($updateId, $error);
+                if (! $terminal) {
+                    $retryError ??= $error;
+                    if ($updateId !== $this->updateId) {
+                        self::dispatch($updateId)->onConnection('database')->onQueue('telegram')->delay(now()->addSeconds(5));
+                    }
                 }
-                // Retain only the deduplication key and operational metadata.
-                DB::table('telegram_updates')->where('update_id', $row->update_id)->update(['payload' => null, 'processed_at' => now(), 'updated_at' => now()]);
             }
+        }
+        if ($retryError) {
+            throw $retryError;
+        }
+    }
+
+    private function recordFailure(int $updateId, \Throwable $error, bool $force = false): bool
+    {
+        $result = DB::transaction(function () use ($updateId, $error, $force) {
+            $row = DB::table('telegram_updates')->where('update_id', $updateId)->first();
+            if (! $row || $row->processed_at || $row->failed_at) {
+                return ['terminal' => true, 'new_failure' => false];
+            }
+            DB::select('SELECT pg_advisory_xact_lock(?)', [$row->telegram_user_id]);
+            $row = DB::table('telegram_updates')->where('update_id', $updateId)->lockForUpdate()->first();
+            if ($row->processed_at || $row->failed_at) {
+                return ['terminal' => true, 'new_failure' => false];
+            }
+            $attempt = $row->attempt_count + 1;
+            $terminal = $force || $attempt >= 3;
+            DB::table('telegram_updates')->where('update_id', $updateId)->update([
+                'status' => $terminal ? 'failed' : 'received', 'attempt_count' => $attempt,
+                'last_error_class' => get_class($error), 'failed_at' => $terminal ? now() : null,
+                'processed_at' => $terminal ? now() : null, 'payload' => $terminal ? null : $row->payload, 'updated_at' => now(),
+            ]);
+            Log::error('telegram_update_failed', ['update_id' => $updateId, 'terminal' => $terminal, 'attempt' => $attempt]
+                + TelegramFailure::context($error));
+
+            return ['terminal' => $terminal, 'new_failure' => true, 'row' => $row];
         }, 3);
+        // Recovery/notification is best effort AFTER the terminal record commits.
+        // A broken recovery handler must never resurrect the poison update.
+        if ($result['terminal'] && $result['new_failure']) {
+            try {
+                DB::transaction(function () use ($result, $updateId) {
+                    $row = $result['row'];
+                    $user = User::where('telegram_user_id', $row->telegram_user_id)->first();
+                    $active = $user ? app(ConversationService::class)->activeFor($user) : null;
+                    if ($user) {
+                        app(InteractionStateResolver::class)->recover($user);
+                    }
+                    $messages = [];
+                    try {
+                        $payload = json_decode(Crypt::decryptString($row->payload), true, 512, JSON_THROW_ON_ERROR);
+                        if (isset($payload['callback_query']['id'])) {
+                            $messages[] = ['method' => 'answerCallbackQuery', 'parameters' => ['callback_query_id' => $payload['callback_query']['id']]];
+                        }
+                    } catch (\Throwable) {
+                        // A malformed envelope has no callback that can be acknowledged.
+                    }
+                    $messages[] = ['method' => 'sendMessage', 'parameters' => ['chat_id' => $row->telegram_user_id,
+                        'text' => __('Something went wrong. I returned you to the safe menu; please try again.'),
+                        'reply_markup' => ['keyboard' => $active ? Keyboard::chatReply($active->is_protected) : Keyboard::homeReply(), 'resize_keyboard' => true, 'is_persistent' => true]]];
+                    foreach ($messages as $sequence => $message) {
+                        $id = DB::table('telegram_outbox')->insertGetId(['update_id' => $updateId, 'sequence' => $sequence,
+                            'payload' => Crypt::encryptString(json_encode($message, JSON_THROW_ON_ERROR)), 'created_at' => now(), 'updated_at' => now()]);
+                        DeliverMessage::dispatch($id)->onConnection('database')->onQueue('telegram-outbound');
+                    }
+                });
+            } catch (\Throwable $recoveryError) {
+                Log::error('telegram_terminal_recovery_failed', ['update_id' => $updateId] + TelegramFailure::context($recoveryError));
+            }
+        }
+
+        return $result['terminal'];
+    }
+
+    public function failed(?\Throwable $error): void
+    {
+        $this->recordFailure($this->updateId, $error ?? new \RuntimeException('Worker failure'), true);
     }
 }

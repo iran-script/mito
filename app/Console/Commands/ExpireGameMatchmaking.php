@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Domain\Games\GameMatchmakingService;
 use App\Domain\Profiles\RegistrationState;
 use App\Domain\Telegram\Keyboard;
 use App\Domain\Telegram\SocialNotificationService;
@@ -20,11 +21,10 @@ class ExpireGameMatchmaking extends Command
         $rows = DB::table('game_matchmaking_queue')
             ->where('status', 'waiting')
             ->where('expires_at', '<=', now())
-            ->lockForUpdate()
             ->get();
 
         foreach ($rows as $row) {
-            $updated = DB::table('game_matchmaking_queue')->where('id', $row->id)->where('status', 'waiting')->update(['status' => 'expired', 'updated_at' => now()]);
+            $updated = app(GameMatchmakingService::class)->expire($row->id);
             if ($updated) {
                 $user = User::find($row->user_id);
                 if ($user) {

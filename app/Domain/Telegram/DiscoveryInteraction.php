@@ -12,6 +12,7 @@ use App\Domain\Events\Event;
 use App\Domain\Events\EventCategory;
 use App\Domain\Events\EventReportReason;
 use App\Domain\Events\EventService;
+use App\Domain\Games\GameMatchmakingService;
 use App\Domain\Games\GameService;
 use App\Domain\Games\GameSession;
 use App\Domain\Games\GameStatus;
@@ -31,17 +32,15 @@ use App\Domain\Payments\PaidFeature;
 use App\Domain\Profiles\Gender;
 use App\Domain\Profiles\Interest;
 use App\Domain\Profiles\Profile;
-use App\Domain\Profiles\ProfileStatus;
 use App\Domain\Profiles\PublicProfile;
 use App\Domain\Profiles\RegistrationState;
 use App\Domain\Telegram\Jobs\MatchmakingPoll;
-use App\Domain\Users\BlockService;
 use App\Domain\Users\MitoId;
 use App\Domain\Users\User;
-use App\Domain\Users\UserStatus;
 use App\Support\Presentation;
 use Carbon\CarbonImmutable;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 
@@ -62,6 +61,9 @@ class DiscoveryInteraction
             return $this->message(__('Location saved. Review your event and publish.'), [[$this->button($state, __('Publish'), 'event_publish'), $this->button($state, __('Cancel'), 'event_cancel_wizard')]]);
         }
         $value = $this->value($update, $state);
+        if ($this->staleGameCallback($user, $update, $state)) {
+            return $this->staleGameResponse($user, $update);
+        }
         if ($update->callback() === null && str_starts_with($interaction->mode, 'profile_edit_')) {
             return $this->profileEditInput($user, $state, $interaction, $update);
         }
@@ -77,10 +79,8 @@ class DiscoveryInteraction
         if (preg_match('/^game_open_([0-9]+)$/', $value ?? '', $m)) {
             try {
                 return $this->openGame($user, $state, GameSession::findOrFail((int) $m[1]));
-            } catch (\Throwable $e) {
-                return $this->message(__('This game is unavailable.'));
-            } catch (\Throwable $e) {
-                return $this->message(Presentation::error($e->getMessage()));
+            } catch (\DomainException|ModelNotFoundException $e) {
+                return $this->staleGameResponse($user, $update);
             }
         }
         if (preg_match('/^game_rps_answer_([0-9]+)_([0-9]+)_(rock|paper|scissors)$/', $value ?? '', $m)) {
@@ -92,10 +92,8 @@ class DiscoveryInteraction
                 $result = $this->games->answer($user, $session, $m[3], null, (int) $m[2]);
 
                 return $this->openGame($user, $state, $session->fresh());
-            } catch (\Throwable $e) {
-                return $this->message(__('This game is unavailable.'));
-            } catch (\Throwable $e) {
-                return $this->message(Presentation::error($e->getMessage()));
+            } catch (\DomainException|ModelNotFoundException $e) {
+                return $this->staleGameResponse($user, $update);
             }
         }
 
@@ -105,10 +103,8 @@ class DiscoveryInteraction
                 $this->games->assertPlayable($user, $session);
 
                 return $this->truthOrDarePrompt($state, $session, $m[1]);
-            } catch (\Throwable $e) {
-                return $this->message(__('This game is unavailable.'));
-            } catch (\Throwable $e) {
-                return $this->message(Presentation::error($e->getMessage()));
+            } catch (\DomainException|ModelNotFoundException $e) {
+                return $this->staleGameResponse($user, $update);
             }
         }
 
@@ -127,7 +123,7 @@ class DiscoveryInteraction
                 }
 
                 return $this->message(Presentation::label($result['hint']).'. '.($result['next_user_id'] === $user->id ? __('Your turn.') : __('Waiting for the other player.')));
-            } catch (\Throwable $e) {
+            } catch (\DomainException|ModelNotFoundException $e) {
                 return $this->message(Presentation::error($e->getMessage()));
             }
         }
@@ -146,7 +142,7 @@ class DiscoveryInteraction
                 }
 
                 return $this->message(__('Statement ').$result['count'].__(' of 3 saved. Enter the next statement:'));
-            } catch (\Throwable $e) {
+            } catch (\DomainException|ModelNotFoundException $e) {
                 return $this->message(Presentation::error($e->getMessage()));
             } catch (\Throwable $e) {
                 $interaction->update(['mode' => 'menu', 'game_context' => null]);
@@ -181,7 +177,7 @@ class DiscoveryInteraction
                 }
 
                 return $this->twoTruthsScreen($user, $state, $session->fresh());
-            } catch (\Throwable $e) {
+            } catch (\DomainException|ModelNotFoundException $e) {
                 return $this->message(Presentation::error($e->getMessage()));
             } catch (\Throwable $e) {
                 return $this->message(__('This game is unavailable.'));
@@ -199,7 +195,7 @@ class DiscoveryInteraction
                 $messages = isset($result['lie']) ? $this->message(($result['correct'] ? __('Correct!') : __('Incorrect.')).__(' The lie was: ').$result['lie']) : [];
 
                 return array_merge($messages, $this->twoTruthsScreen($user, $state, $session->fresh()));
-            } catch (\Throwable $e) {
+            } catch (\DomainException|ModelNotFoundException $e) {
                 return $this->message(Presentation::error($e->getMessage()));
             } catch (\Throwable $e) {
                 return $this->message(__('This game is unavailable.'));
@@ -223,7 +219,7 @@ class DiscoveryInteraction
                 }
 
                 return array_merge($this->message($result['correct'] ? __('Correct!') : __('Incorrect.')), $this->guessInterestScreen($user, $state, $session->fresh()));
-            } catch (\Throwable $e) {
+            } catch (\DomainException|ModelNotFoundException $e) {
                 return $this->message(Presentation::error($e->getMessage()));
             }
         }
@@ -296,7 +292,7 @@ class DiscoveryInteraction
                 $this->games->invite($user, User::findOrFail((int) $m[1]), $type);
 
                 return $this->message(__('Game invitation sent.'), [[$this->button($state, __('Back'), 'games')]]);
-            } catch (\Throwable $e) {
+            } catch (\DomainException|ModelNotFoundException $e) {
                 return $this->message(Presentation::error($e->getMessage()));
             }
         }
@@ -358,8 +354,8 @@ class DiscoveryInteraction
         if (preg_match('/^game_random_gender_(rock_paper_scissors|truth_or_dare)_(female|male)$/', $value ?? '', $m)) {
             return $this->randomGameQueue($user, $state, GameType::from($m[1]), $m[2]);
         }
-        if ($value === 'game_match_cancel') {
-            DB::table('game_matchmaking_queue')->where('user_id', $user->id)->where('status', 'waiting')->update(['status' => 'cancelled', 'updated_at' => now()]);
+        if (preg_match('/^game_match_cancel(?:_([0-9]+))?$/D', $value ?? '', $m)) {
+            app(GameMatchmakingService::class)->cancel($user, isset($m[1]) ? (int) $m[1] : null);
 
             return $this->gamesMenu($user, $state);
         }
@@ -399,7 +395,7 @@ class DiscoveryInteraction
                 $session = $this->games->invite($user, User::findOrFail((int) $m[2]), GameType::from($m[1]));
 
                 return $this->message(__('Game invitation sent.'), [[$this->button($state, __('Back'), 'games')]]);
-            } catch (\Throwable $e) {
+            } catch (\DomainException|ModelNotFoundException $e) {
                 return $this->message(Presentation::error($e->getMessage()));
             }
         }
@@ -430,7 +426,7 @@ class DiscoveryInteraction
                 }
 
                 return $response;
-            } catch (\Throwable $e) {
+            } catch (\DomainException|ModelNotFoundException $e) {
                 return $this->message(Presentation::error($e->getMessage()));
             }
         }
@@ -447,7 +443,7 @@ class DiscoveryInteraction
                 }
 
                 return $this->speedQuizScreen($state, $session->fresh());
-            } catch (\Throwable $e) {
+            } catch (\DomainException|ModelNotFoundException $e) {
                 return $this->message(Presentation::error($e->getMessage()));
             }
         }
@@ -465,7 +461,7 @@ class DiscoveryInteraction
                 }
 
                 return $this->thisOrThatScreen($state, $session->fresh());
-            } catch (\Throwable $e) {
+            } catch (\DomainException|ModelNotFoundException $e) {
                 return $this->message(Presentation::error($e->getMessage()));
             }
         }
@@ -474,7 +470,7 @@ class DiscoveryInteraction
                 $r = $this->games->answer($user, GameSession::findOrFail((int) $m[1]), $m[2]);
 
                 return $r['completed'] ? app(GameHubInteraction::class)->result($user, GameSession::findOrFail((int) $m[1])) : $this->message($r['duplicate'] ? __('Answer already recorded.') : __('Answer recorded.'));
-            } catch (\Throwable $e) {
+            } catch (\DomainException|ModelNotFoundException $e) {
                 return $this->message(Presentation::error($e->getMessage()));
             }
         }
@@ -698,7 +694,7 @@ class DiscoveryInteraction
                 $this->contacts->add($user, User::findOrFail((int) $m[1]));
 
                 return $this->message(__('Added to contacts.'), Keyboard::navigation('d', $state->revision + 1, 'contacts'));
-            } catch (\Throwable $e) {
+            } catch (\DomainException|ModelNotFoundException $e) {
                 return $this->message(Presentation::error($e->getMessage()));
             }
         }
@@ -727,7 +723,7 @@ class DiscoveryInteraction
                 $this->games->invite($user, User::findOrFail((int) $m[1]), $type);
 
                 return $this->message(__('Game invitation sent.'), [[$this->button($state, __('Back'), 'games')]]);
-            } catch (\Throwable $e) {
+            } catch (\DomainException|ModelNotFoundException $e) {
                 return $this->message(Presentation::error($e->getMessage()));
             }
         }
@@ -907,89 +903,14 @@ class DiscoveryInteraction
 
     private function randomGameQueue(User $user, RegistrationState $state, GameType $type, string $desiredGender): array
     {
-        $result = DB::transaction(function () use ($user, $type, $desiredGender) {
-            $now = now();
-            $expires = $now->copy()->addSeconds((int) config('discovery.matchmaking_timeout_seconds', 120));
-            $profile = $user->profile;
-            if ($user->status !== UserStatus::Active || ! $profile || $profile->status !== ProfileStatus::Active) {
-                throw new \DomainException('پروفایلت برای بازی آماده نیست.');
-            }
-
-            $candidateRows = DB::table('game_matchmaking_queue')
-                ->where('status', 'waiting')
-                ->where('game_type', $type->value)
-                ->where('expires_at', '>', $now)
-                ->where('user_id', '<>', $user->id)
-                ->orderBy('started_at')
-                ->lockForUpdate()
-                ->get();
-
-            foreach ($candidateRows as $candidateRow) {
-                $opponent = User::with('profile')->find($candidateRow->user_id);
-                if (! $opponent || $opponent->status !== UserStatus::Active || ! $opponent->profile || $opponent->profile->status !== ProfileStatus::Active) {
-                    DB::table('game_matchmaking_queue')->where('id', $candidateRow->id)->where('status', 'waiting')->update(['status' => 'expired', 'updated_at' => $now]);
-
-                    continue;
-                }
-                $userGender = $profile->gender?->value;
-                $opponentGender = $opponent->profile->gender?->value;
-                if (($candidateRow->desired_gender && $candidateRow->desired_gender !== $userGender) || ($opponentGender && $opponentGender !== $desiredGender)) {
-                    continue;
-                }
-                if (! app(BlockService::class)->isBlocked($user, $opponent)) {
-                    $busy = GameSession::whereIn('status', [GameStatus::Waiting, GameStatus::Accepted, GameStatus::Active])
-                        ->whereHas('participants', fn ($query) => $query->whereKey($user->id))
-                        ->orWhere(fn ($query) => $query->whereIn('status', [GameStatus::Waiting, GameStatus::Accepted, GameStatus::Active])->whereHas('participants', fn ($q) => $q->whereKey($opponent->id)))
-                        ->exists();
-                    if (! $busy) {
-                        $session = GameSession::create([
-                            'game_type' => $type,
-                            'origin' => 'random_matchmaking',
-                            'status' => GameStatus::Active,
-                            'created_by' => $user->id,
-                            'expires_at' => $expires,
-                            'state' => ['started_at' => $now->toIso8601String()],
-                        ]);
-                        $session->participants()->attach([$user->id, $opponent->id]);
-                        DB::table('game_matchmaking_queue')->where('id', $candidateRow->id)->where('status', 'waiting')->update([
-                            'status' => 'matched',
-                            'matched_at' => $now,
-                            'matched_session_id' => $session->id,
-                            'updated_at' => $now,
-                        ]);
-                        DB::table('game_matchmaking_queue')->updateOrInsert(
-                            ['user_id' => $user->id, 'status' => 'matched'],
-                            ['game_type' => $type->value, 'desired_gender' => $desiredGender, 'started_at' => $now, 'expires_at' => $expires, 'matched_at' => $now, 'matched_session_id' => $session->id, 'created_at' => $now, 'updated_at' => $now]
-                        );
-                        $this->games->ensureRound($session);
-                        app(SocialNotificationService::class)->queue($opponent, 'game_matched', $session->id, __('🎉 حریف پیدا شد!')."\n".__('🎮 بازی شروع شد.'), 'game_matched:'.$session->id.':'.$opponent->id, [[['text' => __('🎮 بازی'), 'callback_data' => 'd:0:game_open_'.$session->id]]]);
-
-                        return ['matched' => true];
-                    }
-                }
-            }
-
-            DB::table('game_matchmaking_queue')->where('user_id', $user->id)->where('status', 'waiting')->update(['status' => 'cancelled', 'updated_at' => $now]);
-            DB::table('game_matchmaking_queue')->insert([
-                'user_id' => $user->id,
-                'game_type' => $type->value,
-                'desired_gender' => $desiredGender,
-                'status' => 'waiting',
-                'started_at' => $now,
-                'expires_at' => $expires,
-                'created_at' => $now,
-                'updated_at' => $now,
-            ]);
-
-            return ['matched' => false];
-        });
+        $result = app(GameMatchmakingService::class)->search($user, $type, $desiredGender);
 
         if ($result['matched']) {
-            return $this->message(__('🎉 حریف پیدا شد!')."\n".__('🎮 بازی شروع شد.'));
+            return $this->openGame($user, $state, GameSession::findOrFail($result['session_id']));
         }
 
         return $this->message(__('🔎 دارم یه حریف برات پیدا می‌کنم...')."\n".__('حداکثر زمان انتظار: :minutes دقیقه', ['minutes' => Presentation::persianDigits('۲')]), [
-            [$this->button($state, __('لغو جستجو'), 'game_match_cancel')],
+            [$this->button($state, __('لغو جستجو'), 'game_match_cancel_'.$result['queue_id'])],
         ]);
     }
 
@@ -1789,6 +1710,48 @@ class DiscoveryInteraction
     private function button(RegistrationState $state, string $label, string $value): array
     {
         return Keyboard::button('d', $state->revision + 1, $label, $value);
+    }
+
+    private function staleGameCallback(User $user, IncomingUpdate $update, RegistrationState $state): bool
+    {
+        if (! preg_match('/^d:([0-9]+):(game_[a-z0-9_]+|games)$/D', $update->callback() ?? '', $parts)) {
+            return false;
+        }
+        $action = $parts[2];
+        // Session notifications use revision zero; navigation buttons never bypass revision checks.
+        if (preg_match('/^(?:games$|game_(?:select_|opponent_mode_|random_gender_|match_|type_|pick_))/', $action)
+            && (int) $parts[1] !== $state->revision) {
+            return true;
+        }
+        if (preg_match('/^game_match_cancel_([0-9]+)$/D', $action, $m)) {
+            return ! DB::table('game_matchmaking_queue')->where('id', $m[1])->where('user_id', $user->id)->where('status', 'waiting')->where('expires_at', '>', now())->exists();
+        }
+        if (preg_match('/^game_(?:open|accept|reject|rps_answer|tod_truth|tod_dare)_([0-9]+)(?:_|$)/', $action, $m)) {
+            $session = GameSession::find($m[1]);
+            if (! $session || ! $session->participants()->whereKey($user->id)->exists()
+                || in_array($session->status, [GameStatus::Expired, GameStatus::Cancelled], true)
+                || ($session->status !== GameStatus::Completed && $session->expires_at?->isPast())) {
+                return true;
+            }
+            if (preg_match('/^game_(?:accept|reject)_/', $action) && $session->status !== GameStatus::Waiting) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function staleGameResponse(User $user, IncomingUpdate $update): array
+    {
+        $active = $this->conversations->activeFor($user);
+        $messages = [['method' => 'sendMessage', 'parameters' => ['text' => 'این گزینه دیگه فعال نیست.',
+            'reply_markup' => ['keyboard' => $active ? Keyboard::chatReply($active->is_protected) : Keyboard::homeReply(), 'resize_keyboard' => true, 'is_persistent' => true]]]];
+        $messageId = $update->data['callback_query']['message']['message_id'] ?? null;
+        if ($messageId) {
+            $messages[] = ['method' => 'editMessageReplyMarkup', 'parameters' => ['chat_id' => $update->userId(), 'message_id' => $messageId, 'reply_markup' => ['inline_keyboard' => []]]];
+        }
+
+        return $messages;
     }
 
     private function value(IncomingUpdate $update, RegistrationState $state): ?string

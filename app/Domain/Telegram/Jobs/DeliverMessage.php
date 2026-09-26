@@ -2,11 +2,14 @@
 
 namespace App\Domain\Telegram\Jobs;
 
+use App\Domain\Telegram\PermanentTelegramFailure;
 use App\Domain\Telegram\TelegramClient;
+use App\Domain\Telegram\TelegramFailure;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class DeliverMessage implements ShouldQueue
 {
@@ -18,6 +21,8 @@ class DeliverMessage implements ShouldQueue
 
     public int $timeout = 30;
 
+    public const MAX_ATTEMPTS = 3;
+
     public function __construct(public int $outboxId) {}
 
     public function backoff(): array
@@ -27,24 +32,56 @@ class DeliverMessage implements ShouldQueue
 
     public function handle(TelegramClient $client): void
     {
-        DB::transaction(function () use ($client) {
-            $message = DB::table('telegram_outbox')->where('id', $this->outboxId)->lockForUpdate()->first();
-            if (! $message || $message->sent_at) {
+        $error = null;
+        $again = false;
+        DB::transaction(function () use ($client, &$error, &$again) {
+            $target = DB::table('telegram_outbox')->where('id', $this->outboxId)->first();
+            if (! $target || $target->sent_at || $target->failed_at) {
                 return;
             }
-            $sender = DB::table('telegram_updates')->where('update_id', $message->update_id)->value('telegram_user_id');
-            // Separate lock namespace from incoming processing; maintain per-user delivery order.
+            $sender = DB::table('telegram_updates')->where('update_id', $target->update_id)->value('telegram_user_id');
             DB::select('SELECT pg_advisory_xact_lock(?)', [-$sender]);
-            $earlier = DB::table('telegram_outbox as o')->join('telegram_updates as u', 'u.update_id', '=', 'o.update_id')
-                ->where('u.telegram_user_id', $sender)->whereNull('o.sent_at')->where('o.id', '<', $message->id)->exists();
-            if ($earlier) {
-                $this->release(2);
-
+            // Drive the oldest pending response, even if its original queue job was lost.
+            // Never defer forever behind an orphaned or terminally failed outbox row.
+            $message = DB::table('telegram_outbox as o')->join('telegram_updates as u', 'u.update_id', '=', 'o.update_id')
+                ->where('u.telegram_user_id', $sender)->whereNull('o.sent_at')->whereNull('o.failed_at')
+                ->where('o.id', '<=', $target->id)->orderBy('o.id')->select('o.*')->lockForUpdate()->first();
+            if (! $message) {
                 return;
             }
-            $payload = json_decode(Crypt::decryptString($message->payload), true, 512, JSON_THROW_ON_ERROR);
-            $client->send($payload['method'], $payload['parameters']);
-            DB::table('telegram_outbox')->where('id', $this->outboxId)->update(['payload' => null, 'sent_at' => now(), 'updated_at' => now()]);
+            $attempt = $message->attempt_count + 1;
+            try {
+                $payload = json_decode(Crypt::decryptString($message->payload), true, 512, JSON_THROW_ON_ERROR);
+                $client->send($payload['method'], $payload['parameters']);
+                DB::table('telegram_outbox')->where('id', $message->id)->update([
+                    'payload' => null, 'sent_at' => now(), 'status' => 'sent', 'attempt_count' => $attempt, 'updated_at' => now(),
+                ]);
+            } catch (\Throwable $e) {
+                $terminal = $e instanceof PermanentTelegramFailure || $attempt >= self::MAX_ATTEMPTS;
+                DB::table('telegram_outbox')->where('id', $message->id)->update([
+                    'status' => $terminal ? 'failed' : 'pending', 'attempt_count' => $attempt,
+                    'last_error_class' => get_class($e), 'failed_at' => $terminal ? now() : null, 'updated_at' => now(),
+                ]);
+                Log::error('telegram_delivery_failed', ['outbox_id' => $message->id, 'terminal' => $terminal, 'attempt' => $attempt] + TelegramFailure::context($e));
+                if (! $terminal) {
+                    $error = $e;
+                }
+            }
+            $again = $message->id !== $target->id;
         });
+        // Persist retry/terminal metadata BEFORE raising a transport error to the worker.
+        if ($error) {
+            throw $error;
+        }
+        if ($again) {
+            $this->release(1);
+        }
+    }
+
+    public function failed(?\Throwable $error): void
+    {
+        DB::table('telegram_outbox')->where('id', $this->outboxId)->whereNull('sent_at')->whereNull('failed_at')->update([
+            'status' => 'failed', 'failed_at' => now(), 'last_error_class' => $error ? get_class($error) : 'WorkerFailure', 'updated_at' => now(),
+        ]);
     }
 }

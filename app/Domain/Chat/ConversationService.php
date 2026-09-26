@@ -95,7 +95,7 @@ class ConversationService
             if ($ended) {
                 $conversation->update(['status' => ConversationStatus::Closed, 'is_protected' => false]);
                 $ids = $participants->pluck('id');
-                DB::table('interaction_states')->whereIn('user_id', $ids)->update([
+                DB::table('interaction_states')->whereIn('user_id', $ids)->where('mode', 'chat')->where('conversation_id', $conversation->id)->update([
                     'mode' => 'menu',
                     'conversation_id' => null,
                     'direct_recipient_id' => null,
@@ -105,10 +105,14 @@ class ConversationService
                     'bulk_context' => null,
                     'event_context' => null,
                     'game_context' => null,
+                    'expires_at' => null,
                     'updated_at' => now(),
                 ]);
+                // Other valid workflows survive ending this chat; only detach its reference.
+                DB::table('interaction_states')->whereIn('user_id', $ids)->where('conversation_id', $conversation->id)
+                    ->update(['conversation_id' => null, 'updated_at' => now()]);
                 DB::table('matchmaking_searches')->whereIn('user_id', $ids)
-                    ->whereIn('status', ['waiting', 'matched'])
+                    ->where('status', 'matched')->whereIn('matched_user_id', $ids)
                     ->update([
                         'status' => 'cancelled',
                         'matched_user_id' => null,
