@@ -745,10 +745,12 @@ class FinalPhase7Test extends TestCase
         $keyboard = json_encode($last['parameters']['reply_markup']);
         $this->assertStringContainsString('profile_'.$b->id.'_game_pick_contacts_rock_paper_scissors_1', $keyboard);
         $this->assertStringNotContainsString('profile_'.$c->id.'_game_pick_contacts_rock_paper_scissors_1', $keyboard);
-        $this->send($a, 'd:0:game_type_opponent_rock_paper_scissors');
+        $revision = (int) DB::table('registration_states')->where('user_id', $a->id)->value('revision');
+        $this->send($a, 'd:'.$revision.':game_type_opponent_rock_paper_scissors');
         $before = collect($this->telegram->sent)->filter(fn ($m) => isset($m['parameters']['text']))->last()['parameters']['reply_markup'];
         app(GoldMembershipService::class)->activate($c, now()->addDay(), 'test');
-        $this->send($a, 'd:0:game_type_opponent_rock_paper_scissors');
+        $revision = (int) DB::table('registration_states')->where('user_id', $a->id)->value('revision');
+        $this->send($a, 'd:'.$revision.':game_type_opponent_rock_paper_scissors');
         $after = collect($this->telegram->sent)->filter(fn ($m) => isset($m['parameters']['text']))->last()['parameters']['reply_markup'];
         $this->assertSame(array_column(array_merge(...$before['inline_keyboard']), 'text'), array_column(array_merge(...$after['inline_keyboard']), 'text'));
         $this->assertPrivateMessages($a, $b, $c);
