@@ -131,9 +131,13 @@ class FocusedPersianEconomyUxTest extends TestCase
             $this->assertStringNotContainsString($hidden, $visible);
         }
         $other = $this->user('حریف');
+        app(WalletService::class)->wallet($user)->update(['balance' => 10]);
+        app(WalletService::class)->wallet($other)->update(['balance' => 10]);
         $session = app(GameService::class)->invite($user, $other, GameType::TruthOrDare);
         app(GameService::class)->accept($other, $session);
-        $this->assertSame(0, DB::table('coin_transactions')->count());
+        $this->assertSame(8, $user->wallet->fresh()->balance);
+        $this->assertSame(10, $other->wallet->fresh()->balance);
+        $this->assertDatabaseHas('coin_transactions', ['user_id' => $user->id, 'code' => 'game_invitation', 'amount' => -2]);
         $this->send($other, 'd:0:game_open_'.$session->id);
         $game = json_encode($this->telegram->sent, JSON_UNESCAPED_UNICODE);
         $this->assertStringContainsString(__('Truth'), $game);
