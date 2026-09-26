@@ -168,7 +168,7 @@ class DiscoveryInteraction
             return $this->message(__("Recipients: :v1\nCost per recipient: :v2 coins\nTotal: :v3 coins\nBalance: ", ['v1' => $eligible->count(), 'v2' => $price, 'v3' => $cost]).($user->wallet?->balance ?? 0), [[$this->button($state, __('Confirm Send'), 'bulk_confirm_direct'), $this->button($state, __('Cancel'), 'bulk_cancel')]]);
         }
         if ($value === null) {
-            return $this->menu($state);
+            return array_merge($this->message(__('This option is no longer active.')), $this->menu($state));
         }
         if (preg_match('/^game_tt_(accept|open)_([0-9]+)$/', $value, $m)) {
             try {

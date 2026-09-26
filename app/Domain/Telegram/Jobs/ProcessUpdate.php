@@ -11,6 +11,8 @@ use App\Domain\Profiles\RegistrationState;
 use App\Domain\Telegram\DiscoveryInteraction;
 use App\Domain\Telegram\IncomingUpdate;
 use App\Domain\Telegram\InteractionState;
+use App\Domain\Chat\ConversationService;
+use Illuminate\Support\Facades\Log;
 use App\Domain\Telegram\Keyboard;
 use App\Domain\Telegram\RegistrationPresenter;
 use App\Domain\Telegram\SocialInteraction;
@@ -73,6 +75,8 @@ class ProcessUpdate implements ShouldQueue
                         $state = RegistrationState::firstOrCreate(['user_id' => $user->id]);
                         $interaction = InteractionState::firstOrCreate(['user_id' => $user->id]);
                         $input = $update->input(null);
+                        $isStart = $update->callback() === null && str_starts_with(Presentation::input(trim($input->text ?? '')), '/start');
+                        $recovery = app(\App\Domain\Telegram\InteractionStateResolver::class)->resolve($user, $interaction);
                         $replyText = trim($input->text ?? '');
                         $homeAction = $update->callback() === null ? Keyboard::homeAction($replyText) : null;
                         $searchAction = $update->callback() === null ? Keyboard::searchAction($replyText, $interaction->mode) : null;
@@ -139,6 +143,9 @@ class ProcessUpdate implements ShouldQueue
                         $state->save();
                         $interaction->revision = $state->revision;
                         $interaction->save();
+                        if (($recovery['recovered' ] ?? false) && ! $isStart) {
+                            array_unshift($messages, ['method' => 'sendMessage', 'parameters' => ['text' => __('Your previous step expired. You are back at the main menu.')]]);
+                        }
                         if ($profile->status !== ProfileStatus::Active && ! $update->location()) {
                             $messages = array_merge($messages, $presenter->messages($profile->fresh(), $state, $error));
                         }
@@ -150,6 +157,11 @@ class ProcessUpdate implements ShouldQueue
                         }
                     } catch (\DomainException $e) {
                         $messages[] = ['method' => 'sendMessage', 'parameters' => ['text' => Presentation::error($e->getMessage())]];
+                    } catch (\Throwable $e) {
+                        Log::error('telegram_update_exception', ['update_id' => $row->update_id, 'user_id' => $user->id, 'state' => $interaction->mode ?? null, 'exception' => $e]);
+                        app(\App\Domain\Telegram\InteractionStateResolver::class)->recover($user, $interaction);
+                        $active = app(ConversationService::class)->activeFor($user);
+                        $messages = [['method' => 'sendMessage', 'parameters' => ['text' => __('Something went wrong. I returned you to the safe menu; please try again.'), 'reply_markup' => ['keyboard' => $active ? Keyboard::chatReply($active->is_protected) : Keyboard::homeReply(), 'resize_keyboard' => true, 'is_persistent' => true]]]];
                     }
                 }
                 foreach ($messages as $sequence => $message) {

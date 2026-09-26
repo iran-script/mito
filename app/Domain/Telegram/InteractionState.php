@@ -1,44 +1,14 @@
 <?php
-
 namespace App\Domain\Telegram;
-
-use App\Domain\Chat\Conversation;
-use App\Domain\Users\User;
 use Illuminate\Database\Eloquent\Model;
-
 class InteractionState extends Model
 {
-    protected $guarded = ['id'];
-
-    protected $attributes = ['mode' => 'menu', 'revision' => 0];
-
-    protected function casts(): array
-    {
-        return ['bulk_selection' => 'array', 'bulk_context' => 'array', 'event_context' => 'array', 'game_context' => 'array', 'direct_context' => 'array'];
-    }
-
-    public function resetNavigation(): void
-    {
-        $this->update([
-            'mode' => 'menu', 'conversation_id' => null, 'direct_recipient_id' => null,
-            'bulk_mode' => null, 'bulk_selection' => null, 'bulk_context' => null,
-            'event_context' => null, 'game_context' => null,
-            'direct_context' => null,
-        ]);
-    }
-
-    public function user()
-    {
-        return $this->belongsTo(User::class);
-    }
-
-    public function conversation()
-    {
-        return $this->belongsTo(Conversation::class);
-    }
-
-    public function directRecipient()
-    {
-        return $this->belongsTo(User::class, 'direct_recipient_id');
-    }
+    protected $guarded=['id'];
+    protected $attributes=['mode'=>'menu','revision'=>0];
+    protected function casts(): array { return ['bulk_selection'=>'array','bulk_context'=>'array','event_context'=>'array','game_context'=>'array','direct_context'=>'array','expires_at'=>'immutable_datetime']; }
+    protected static function booted(): void { static::saving(function(self $state): void { $state->expires_at=InteractionStateResolver::expiryForMode($state->mode); }); }
+    public function resetNavigation(): void { $this->update(['mode'=>'menu','conversation_id'=>null,'direct_recipient_id'=>null,'bulk_mode'=>null,'bulk_selection'=>null,'bulk_context'=>null,'event_context'=>null,'game_context'=>null,'direct_context'=>null]); }
+    public function user(){return $this->belongsTo(\App\Domain\Users\User::class);}
+    public function conversation(){return $this->belongsTo(\App\Domain\Chat\Conversation::class);}
+    public function directRecipient(){return $this->belongsTo(\App\Domain\Users\User::class,'direct_recipient_id');}
 }

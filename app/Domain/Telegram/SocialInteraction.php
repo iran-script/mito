@@ -316,7 +316,7 @@ class SocialInteraction
             return [];
         }
 
-        return $this->menu($state);
+        return array_merge($this->message(__('This option is no longer active.')), $this->menu($state));
     }
 
     public function menu(InteractionState $state): array

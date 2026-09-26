@@ -808,5 +808,8 @@
     "Truth prompt attraction": "💬 چه ویژگی‌هایی در آدم‌ها خیلی سریع جذبت می‌کنه؟",
     "Dare prompt funny voice": "😈 یه ویس ۱۰ ثانیه‌ای با لحن خنده‌دار بفرست.",
     "Dare prompt emojis": "😈 سه ایموجی بفرست که حالت الانت رو توصیف کنه.",
-    "Dare prompt compliment": "😈 یه تعریف واقعی از طرف مقابل بکن."
+    "Dare prompt compliment": "😈 یه تعریف واقعی از طرف مقابل بکن.",
+  "Your previous step expired. You are back at the main menu.": "وضعیت قبلی منقضی شده بود.\n🏠 به منوی اصلی برگشتی.",
+  "This option is no longer active.": "این گزینه دیگه فعال نیست.",
+  "Something went wrong. I returned you to the safe menu; please try again.": "یه مشکلی پیش اومد.\n🏠 برگشتم به منوی اصلی؛ دوباره امتحان کن."
 }

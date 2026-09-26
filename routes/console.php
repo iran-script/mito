@@ -13,5 +13,6 @@ Schedule::command('events:send-reminders')->everyMinute()->withoutOverlapping();
 Schedule::command('games:cleanup')->everyMinute()->withoutOverlapping();
 Schedule::command('chat:expire-requests')->everyMinute()->withoutOverlapping();
 Schedule::command('games:matchmaking-expire')->everyMinute()->withoutOverlapping();
+Schedule::command('mito:cleanup-states')->everyMinute()->withoutOverlapping();
 
 Schedule::command('games:weekly-badges')->weeklyOn(1, '00:05')->timezone(config('app.timezone'))->withoutOverlapping();
