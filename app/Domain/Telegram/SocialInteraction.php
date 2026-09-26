@@ -212,10 +212,15 @@ class SocialInteraction
         if ($value && str_starts_with($value, 'cleanup_chat_')) {
             $conversation = Conversation::findOrFail((int) substr($value, 13));
             $status = $this->cleanup->request($user, $conversation);
-
-            return $this->message($status === 'completed'
+            $response = $this->message($status === 'completed'
                 ? __('Conversation messages were already cleaned up.')
                 : __('Cleaning up conversation messages...'));
+            $callbackMessage = $update->data['callback_query']['message'] ?? null;
+            if ($callbackMessage && isset($callbackMessage['message_id'], $callbackMessage['chat']['id'])) {
+                $response[] = ['method' => 'editMessageReplyMarkup', 'parameters' => ['chat_id' => $callbackMessage['chat']['id'], 'message_id' => $callbackMessage['message_id'], 'reply_markup' => ['inline_keyboard' => []]]];
+            }
+
+            return $response;
         }
         if ($value && str_starts_with($value, 'cancel_cleanup_chat_')) {
             return $this->message(__('Cleanup cancelled.'));
@@ -223,10 +228,15 @@ class SocialInteraction
         if ($value && str_starts_with($value, 'confirm_cleanup_chat_')) {
             $conversation = Conversation::findOrFail((int) substr($value, 21));
             $status = $this->cleanup->request($user, $conversation);
-
-            return $this->message($status === 'completed'
+            $response = $this->message($status === 'completed'
                 ? __('Conversation messages were already cleaned up.')
                 : __('Cleaning up conversation messages...'));
+            $callbackMessage = $update->data['callback_query']['message'] ?? null;
+            if ($callbackMessage && isset($callbackMessage['message_id'], $callbackMessage['chat']['id'])) {
+                $response[] = ['method' => 'editMessageReplyMarkup', 'parameters' => ['chat_id' => $callbackMessage['chat']['id'], 'message_id' => $callbackMessage['message_id'], 'reply_markup' => ['inline_keyboard' => []]]];
+            }
+
+            return $response;
         }
         if ($value === 'close_chat') {
             $conversation = $this->activeConversation($user, $state);

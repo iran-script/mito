@@ -40,7 +40,7 @@ return new class extends Migration
         }
         DB::unprepared("CREATE OR REPLACE FUNCTION reject_immutable_admin_record() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''Immutable history cannot be changed''; END';");
         foreach (['admin_audit_logs', 'coin_transactions'] as $table) {
-            DB::unprepared("CREATE TRIGGER immutable_history BEFORE UPDATE OR DELETE ON {$table} FOR EACH ROW EXECUTE FUNCTION reject_immutable_admin_record()");
+            DB::unprepared("CREATE TRIGGER immutable_history BEFORE UPDATE OR DELETE ON {$table} FOR EACH ROW EXECUTE PROCEDURE reject_immutable_admin_record()");
         }
     }
 

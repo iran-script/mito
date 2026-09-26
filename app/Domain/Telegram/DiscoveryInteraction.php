@@ -31,15 +31,17 @@ use App\Domain\Payments\PaidFeature;
 use App\Domain\Profiles\Gender;
 use App\Domain\Profiles\Interest;
 use App\Domain\Profiles\Profile;
+use App\Domain\Profiles\ProfileStatus;
 use App\Domain\Profiles\PublicProfile;
 use App\Domain\Profiles\RegistrationState;
 use App\Domain\Telegram\Jobs\MatchmakingPoll;
+use App\Domain\Users\BlockService;
 use App\Domain\Users\MitoId;
 use App\Domain\Users\User;
+use App\Domain\Users\UserStatus;
 use App\Support\Presentation;
 use Carbon\CarbonImmutable;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
-use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 
@@ -75,9 +77,9 @@ class DiscoveryInteraction
         if (preg_match('/^game_open_([0-9]+)$/', $value ?? '', $m)) {
             try {
                 return $this->openGame($user, $state, GameSession::findOrFail((int) $m[1]));
-            } catch (ModelNotFoundException $e) {
+            } catch (\Throwable $e) {
                 return $this->message(__('This game is unavailable.'));
-            } catch (\DomainException $e) {
+            } catch (\Throwable $e) {
                 return $this->message(Presentation::error($e->getMessage()));
             }
         }
@@ -90,9 +92,9 @@ class DiscoveryInteraction
                 $result = $this->games->answer($user, $session, $m[3], null, (int) $m[2]);
 
                 return $this->openGame($user, $state, $session->fresh());
-            } catch (ModelNotFoundException $e) {
+            } catch (\Throwable $e) {
                 return $this->message(__('This game is unavailable.'));
-            } catch (\DomainException $e) {
+            } catch (\Throwable $e) {
                 return $this->message(Presentation::error($e->getMessage()));
             }
         }
@@ -103,9 +105,9 @@ class DiscoveryInteraction
                 $this->games->assertPlayable($user, $session);
 
                 return $this->truthOrDarePrompt($state, $session, $m[1]);
-            } catch (ModelNotFoundException $e) {
+            } catch (\Throwable $e) {
                 return $this->message(__('This game is unavailable.'));
-            } catch (\DomainException $e) {
+            } catch (\Throwable $e) {
                 return $this->message(Presentation::error($e->getMessage()));
             }
         }
@@ -144,9 +146,9 @@ class DiscoveryInteraction
                 }
 
                 return $this->message(__('Statement ').$result['count'].__(' of 3 saved. Enter the next statement:'));
-            } catch (\DomainException $e) {
+            } catch (\Throwable $e) {
                 return $this->message(Presentation::error($e->getMessage()));
-            } catch (ModelNotFoundException $e) {
+            } catch (\Throwable $e) {
                 $interaction->update(['mode' => 'menu', 'game_context' => null]);
 
                 return $this->message(__('This game is no longer available.'));
@@ -179,9 +181,9 @@ class DiscoveryInteraction
                 }
 
                 return $this->twoTruthsScreen($user, $state, $session->fresh());
-            } catch (\DomainException $e) {
+            } catch (\Throwable $e) {
                 return $this->message(Presentation::error($e->getMessage()));
-            } catch (ModelNotFoundException $e) {
+            } catch (\Throwable $e) {
                 return $this->message(__('This game is unavailable.'));
             }
         }
@@ -197,9 +199,9 @@ class DiscoveryInteraction
                 $messages = isset($result['lie']) ? $this->message(($result['correct'] ? __('Correct!') : __('Incorrect.')).__(' The lie was: ').$result['lie']) : [];
 
                 return array_merge($messages, $this->twoTruthsScreen($user, $state, $session->fresh()));
-            } catch (\DomainException $e) {
+            } catch (\Throwable $e) {
                 return $this->message(Presentation::error($e->getMessage()));
-            } catch (ModelNotFoundException $e) {
+            } catch (\Throwable $e) {
                 return $this->message(__('This game is unavailable.'));
             }
         }
@@ -285,6 +287,19 @@ class DiscoveryInteraction
         if ($value === 'match_filters') {
             return $this->genderMenu($state, 'anonymous');
         }
+        if (preg_match('/^profile_([1-9][0-9]*)_game_pick_(contacts|opponent)_(rock_paper_scissors|truth_or_dare)_([0-9]+)$/D', $value ?? '', $m)) {
+            try {
+                $type = GameType::tryFrom($m[3]);
+                if (! $type || ! in_array($type, [GameType::RockPaperScissors, GameType::TruthOrDare], true)) {
+                    return $this->message(__('That game is unavailable.'));
+                }
+                $this->games->invite($user, User::findOrFail((int) $m[1]), $type);
+
+                return $this->message(__('Game invitation sent.'), [[$this->button($state, __('Back'), 'games')]]);
+            } catch (\Throwable $e) {
+                return $this->message(Presentation::error($e->getMessage()));
+            }
+        }
         if (preg_match('/^profile_([1-9][0-9]*)(?:_(.+))?$/D', $value ?? '', $m)) {
             $profile = Profile::with(['city', 'interests', 'user'])->where('status', 'active')->where('user_id', (int) $m[1])->first();
             if (! $profile) {
@@ -314,23 +329,13 @@ class DiscoveryInteraction
             return $this->gamesMenu($user, $state);
         }
         if ($value === 'game_more') {
-            return $this->moreGamesMenu($state);
+            return $this->gamesMenu($user, $state);
         }
         if ($value === 'game_stats_menu') {
             return $this->gameStatsMenu($state);
         }
-        if (preg_match('/^game_select_([a-z_]+)$/D', $value ?? '', $m)) {
-            $type = GameType::tryFrom($m[1]);
-            if (! $type) {
-                return $this->message(__('This game is unavailable.'));
-            }
-
-            return $this->message(__('Who would you like to play with?'), [
-                [$this->button($state, __('Random opponent'), 'game_type_random_'.$type->value)],
-                [$this->button($state, __('Play with contacts'), 'game_type_contacts_'.$type->value)],
-                [$this->button($state, __('Choose someone'), 'game_type_opponent_'.$type->value)],
-                [$this->button($state, __('Back'), 'games')],
-            ]);
+        if (preg_match('/^game_select_(rock_paper_scissors|truth_or_dare)$/D', $value ?? '', $m)) {
+            return $this->gameOpponentModeMenu($state, GameType::from($m[1]));
         }
         if ($value === 'game_back') {
             return $this->menu($state);
@@ -338,26 +343,51 @@ class DiscoveryInteraction
         if ($value === 'game_opponent' || $value === 'game_random' || $value === 'game_contacts') {
             return $this->gameTypeMenu($state, $value);
         }
+        if (preg_match('/^game_opponent_mode_(random|contacts)_(rock_paper_scissors|truth_or_dare)$/', $value ?? '', $m)) {
+            $type = GameType::from($m[2]);
+            if ($m[1] === 'contacts') {
+                return $this->gameOpponents($user, $state, 'contacts', $type, 1);
+            }
+
+            return $this->message(__('👥 دوست داری با چه کسی بازی کنی؟'), [
+                [$this->button($state, __('👩 دختر'), 'game_random_gender_'.$type->value.'_female')],
+                [$this->button($state, __('👨 پسر'), 'game_random_gender_'.$type->value.'_male')],
+                [$this->button($state, __('انصراف'), 'games')],
+            ]);
+        }
+        if (preg_match('/^game_random_gender_(rock_paper_scissors|truth_or_dare)_(female|male)$/', $value ?? '', $m)) {
+            return $this->randomGameQueue($user, $state, GameType::from($m[1]), $m[2]);
+        }
+        if ($value === 'game_match_cancel') {
+            DB::table('game_matchmaking_queue')->where('user_id', $user->id)->where('status', 'waiting')->update(['status' => 'cancelled', 'updated_at' => now()]);
+
+            return $this->gamesMenu($user, $state);
+        }
+        if ($value === 'game_match_retry') {
+            $row = DB::table('game_matchmaking_queue')->where('user_id', $user->id)->whereIn('status', ['expired', 'cancelled'])->latest('updated_at')->first();
+            if (! $row || ! GameType::tryFrom($row->game_type)) {
+                return $this->gamesMenu($user, $state);
+            }
+
+            return $this->randomGameQueue($user, $state, GameType::from($row->game_type), (string) $row->desired_gender);
+        }
         if (preg_match('/^game_type_(opponent|random|contacts)_([a-z_]+)$/', $value, $m)) {
             $type = GameType::tryFrom($m[2]);
-            if (! $type) {
+            if (! $type || ! in_array($type, [GameType::RockPaperScissors, GameType::TruthOrDare], true)) {
                 return $this->message(__('That game is unavailable.'));
             }
-            if ($m[1] !== 'random') {
-                return $this->gameOpponents($user, $state, $m[1], $type, 1);
+            if ($m[1] === 'contacts') {
+                return $this->gameOpponents($user, $state, 'contacts', $type, 1);
             }
-            $candidates = $m[1] === 'contacts' ? $this->contacts->list($user)->pluck('contact_user_id') : User::where('id', '!=', $user->id)->where('status', 'active')->pluck('id');
-            $opponent = User::whereIn('id', $candidates)->where('status', 'active')->whereHas('profile', fn ($q) => $q->where('status', 'active'))->whereNotIn('id', DB::table('user_blocks')->where('blocker_user_id', $user->id)->select('blocked_user_id'))->whereNotIn('id', DB::table('user_blocks')->where('blocked_user_id', $user->id)->select('blocker_user_id'))->inRandomOrder()->first();
-            if (! $opponent) {
-                return $this->message(__('No eligible opponent is available.'), [[$this->button($state, __('Back'), 'games')]]);
+            if ($m[1] === 'random') {
+                return $this->message(__('👥 دوست داری با چه کسی بازی کنی؟'), [
+                    [$this->button($state, __('👩 دختر'), 'game_random_gender_'.$type->value.'_female')],
+                    [$this->button($state, __('👨 پسر'), 'game_random_gender_'.$type->value.'_male')],
+                    [$this->button($state, __('انصراف'), 'games')],
+                ]);
             }
-            try {
-                $this->games->invite($user, $opponent, $type);
 
-                return $this->message(__('Game invitation sent.'), [[$this->button($state, __('Back'), 'games')]]);
-            } catch (\Throwable $e) {
-                return $this->message(Presentation::error($e->getMessage()));
-            }
+            return $this->gameOpponents($user, $state, 'opponent', $type, 1);
         }
         if (preg_match('/^game_pick_(opponent|contacts)_([a-z_]+)_([0-9]+)$/', $value, $m)) {
             $type = GameType::tryFrom($m[2]);
@@ -373,11 +403,33 @@ class DiscoveryInteraction
                 return $this->message(Presentation::error($e->getMessage()));
             }
         }
+        if (preg_match('/^game_reject_([0-9]+)$/', $value, $m)) {
+            $session = GameSession::findOrFail((int) $m[1]);
+            if ((int) ($session->state['opponent_id'] ?? 0) !== $user->id) {
+                throw new \DomainException('فقط دعوت‌شده می‌تواند درخواست بازی را رد کند.');
+            }
+            if ($session->status === GameStatus::Waiting) {
+                $session->update(['status' => GameStatus::Cancelled]);
+                app(SocialNotificationService::class)->queue($session->creator, 'game_rejected', $session->id, __('درخواست بازی شما رد شد.'), 'game_rejected:'.$session->id);
+            }
+            $response = $this->message(__('درخواست بازی رد شد.'));
+            $callbackMessage = $update->data['callback_query']['message'] ?? null;
+            if ($callbackMessage && isset($callbackMessage['message_id'], $callbackMessage['chat']['id'])) {
+                $response[] = ['method' => 'editMessageReplyMarkup', 'parameters' => ['chat_id' => $callbackMessage['chat']['id'], 'message_id' => $callbackMessage['message_id'], 'reply_markup' => ['inline_keyboard' => []]]];
+            }
+
+            return $response;
+        }
         if (preg_match('/^game_accept_([0-9]+)$/', $value, $m)) {
             try {
                 $this->games->accept($user, GameSession::findOrFail((int) $m[1]));
+                $response = $this->openGame($user, $state, GameSession::findOrFail((int) $m[1]));
+                $callbackMessage = $update->data['callback_query']['message'] ?? null;
+                if ($callbackMessage && isset($callbackMessage['message_id'], $callbackMessage['chat']['id'])) {
+                    $response[] = ['method' => 'editMessageReplyMarkup', 'parameters' => ['chat_id' => $callbackMessage['chat']['id'], 'message_id' => $callbackMessage['message_id'], 'reply_markup' => ['inline_keyboard' => []]]];
+                }
 
-                return $this->openGame($user, $state, GameSession::findOrFail((int) $m[1]));
+                return $response;
             } catch (\Throwable $e) {
                 return $this->message(Presentation::error($e->getMessage()));
             }
@@ -445,7 +497,7 @@ class DiscoveryInteraction
         if (preg_match('/^event_day_([0-9]{8})$/D', $value ?? '', $m) && $interaction->mode === 'event_create') {
             try {
                 $day = CarbonImmutable::createFromFormat('!Ymd', $m[1], config('presentation.timezone'));
-            } catch (\Throwable) {
+            } catch (\Throwable $e) {
                 $day = null;
             }
             if (! $day || $day->lt(CarbonImmutable::today(config('presentation.timezone'))) || $day->gt(CarbonImmutable::today(config('presentation.timezone'))->addDays(30))) {
@@ -646,7 +698,7 @@ class DiscoveryInteraction
                 $this->contacts->add($user, User::findOrFail((int) $m[1]));
 
                 return $this->message(__('Added to contacts.'), Keyboard::navigation('d', $state->revision + 1, 'contacts'));
-            } catch (\DomainException $e) {
+            } catch (\Throwable $e) {
                 return $this->message(Presentation::error($e->getMessage()));
             }
         }
@@ -666,14 +718,27 @@ class DiscoveryInteraction
                 [$this->button($state, __('Back'), 'profile_'.$id)],
             ]);
         }
-        if (preg_match('/^profile_game_([1-9][0-9]*)$/D', $value ?? '', $m)) {
-            $rows = [];
-            foreach (GameType::cases() as $type) {
-                $rows[] = [$this->button($state, Presentation::label($type->value), 'game_play_'.$type->value.'_'.$m[1])];
-            }
-            $rows[] = [$this->button($state, __('Back'), 'profile_'.$m[1])];
+        if (preg_match('/^profile_([1-9][0-9]*)_game_pick_(contacts|opponent)_(rock_paper_scissors|truth_or_dare)_([0-9]+)$/D', $value ?? '', $m)) {
+            try {
+                $type = GameType::tryFrom($m[3]);
+                if (! $type || ! in_array($type, [GameType::RockPaperScissors, GameType::TruthOrDare], true)) {
+                    return $this->message(__('That game is unavailable.'));
+                }
+                $this->games->invite($user, User::findOrFail((int) $m[1]), $type);
 
-            return $this->message(__('Choose a game to invite them to.'), $rows);
+                return $this->message(__('Game invitation sent.'), [[$this->button($state, __('Back'), 'games')]]);
+            } catch (\Throwable $e) {
+                return $this->message(Presentation::error($e->getMessage()));
+            }
+        }
+        if (preg_match('/^profile_game_([1-9][0-9]*)$/D', $value ?? '', $m)) {
+            $rows = [
+                [$this->button($state, __('✊ سنگ، کاغذ، قیچی'), 'game_play_rock_paper_scissors_'.$m[1])],
+                [$this->button($state, __('😈 جرأت یا حقیقت'), 'game_play_truth_or_dare_'.$m[1])],
+                [$this->button($state, __('انصراف'), 'profile_'.$m[1])],
+            ];
+
+            return $this->message(__('🎮 یک بازی انتخاب کن:'), $rows);
         }
         if (str_starts_with($value, 'contact_')) {
             $contact = User::with(['profile.city', 'profile.interests'])->findOrFail((int) substr($value, 8));
@@ -831,15 +896,112 @@ class DiscoveryInteraction
         ]);
     }
 
+    private function gameOpponentModeMenu(RegistrationState $state, GameType $type): array
+    {
+        return $this->message(__('🎯 حریف رو چطور انتخاب می‌کنی؟'), [
+            [$this->button($state, __('🎲 حریف تصادفی'), 'game_opponent_mode_random_'.$type->value)],
+            [$this->button($state, __('👥 بازی با مخاطبین'), 'game_opponent_mode_contacts_'.$type->value)],
+            [$this->button($state, __('بازگشت'), 'games')],
+        ]);
+    }
+
+    private function randomGameQueue(User $user, RegistrationState $state, GameType $type, string $desiredGender): array
+    {
+        $result = DB::transaction(function () use ($user, $type, $desiredGender) {
+            $now = now();
+            $expires = $now->copy()->addSeconds((int) config('discovery.matchmaking_timeout_seconds', 120));
+            $profile = $user->profile;
+            if ($user->status !== UserStatus::Active || ! $profile || $profile->status !== ProfileStatus::Active) {
+                throw new \DomainException('پروفایلت برای بازی آماده نیست.');
+            }
+
+            $candidateRows = DB::table('game_matchmaking_queue')
+                ->where('status', 'waiting')
+                ->where('game_type', $type->value)
+                ->where('expires_at', '>', $now)
+                ->where('user_id', '<>', $user->id)
+                ->orderBy('started_at')
+                ->lockForUpdate()
+                ->get();
+
+            foreach ($candidateRows as $candidateRow) {
+                $opponent = User::with('profile')->find($candidateRow->user_id);
+                if (! $opponent || $opponent->status !== UserStatus::Active || ! $opponent->profile || $opponent->profile->status !== ProfileStatus::Active) {
+                    DB::table('game_matchmaking_queue')->where('id', $candidateRow->id)->where('status', 'waiting')->update(['status' => 'expired', 'updated_at' => $now]);
+
+                    continue;
+                }
+                $userGender = $profile->gender?->value;
+                $opponentGender = $opponent->profile->gender?->value;
+                if (($candidateRow->desired_gender && $candidateRow->desired_gender !== $userGender) || ($opponentGender && $opponentGender !== $desiredGender)) {
+                    continue;
+                }
+                if (! app(BlockService::class)->isBlocked($user, $opponent)) {
+                    $busy = GameSession::whereIn('status', [GameStatus::Waiting, GameStatus::Accepted, GameStatus::Active])
+                        ->whereHas('participants', fn ($query) => $query->whereKey($user->id))
+                        ->orWhere(fn ($query) => $query->whereIn('status', [GameStatus::Waiting, GameStatus::Accepted, GameStatus::Active])->whereHas('participants', fn ($q) => $q->whereKey($opponent->id)))
+                        ->exists();
+                    if (! $busy) {
+                        $session = GameSession::create([
+                            'game_type' => $type,
+                            'origin' => 'random_matchmaking',
+                            'status' => GameStatus::Active,
+                            'created_by' => $user->id,
+                            'expires_at' => $expires,
+                            'state' => ['started_at' => $now->toIso8601String()],
+                        ]);
+                        $session->participants()->attach([$user->id, $opponent->id]);
+                        DB::table('game_matchmaking_queue')->where('id', $candidateRow->id)->where('status', 'waiting')->update([
+                            'status' => 'matched',
+                            'matched_at' => $now,
+                            'matched_session_id' => $session->id,
+                            'updated_at' => $now,
+                        ]);
+                        DB::table('game_matchmaking_queue')->updateOrInsert(
+                            ['user_id' => $user->id, 'status' => 'matched'],
+                            ['game_type' => $type->value, 'desired_gender' => $desiredGender, 'started_at' => $now, 'expires_at' => $expires, 'matched_at' => $now, 'matched_session_id' => $session->id, 'created_at' => $now, 'updated_at' => $now]
+                        );
+                        $this->games->ensureRound($session);
+                        app(SocialNotificationService::class)->queue($opponent, 'game_matched', $session->id, __('🎉 حریف پیدا شد!')."\n".__('🎮 بازی شروع شد.'), 'game_matched:'.$session->id.':'.$opponent->id, [[['text' => __('🎮 بازی'), 'callback_data' => 'd:0:game_open_'.$session->id]]]);
+
+                        return ['matched' => true];
+                    }
+                }
+            }
+
+            DB::table('game_matchmaking_queue')->where('user_id', $user->id)->where('status', 'waiting')->update(['status' => 'cancelled', 'updated_at' => $now]);
+            DB::table('game_matchmaking_queue')->insert([
+                'user_id' => $user->id,
+                'game_type' => $type->value,
+                'desired_gender' => $desiredGender,
+                'status' => 'waiting',
+                'started_at' => $now,
+                'expires_at' => $expires,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+
+            return ['matched' => false];
+        });
+
+        if ($result['matched']) {
+            return $this->message(__('🎉 حریف پیدا شد!')."\n".__('🎮 بازی شروع شد.'));
+        }
+
+        return $this->message(__('🔎 دارم یه حریف برات پیدا می‌کنم...')."\n".__('حداکثر زمان انتظار: :minutes دقیقه', ['minutes' => Presentation::persianDigits('۲')]), [
+            [$this->button($state, __('لغو جستجو'), 'game_match_cancel')],
+        ]);
+    }
+
     private function gameTypeMenu(RegistrationState $state, string $mode): array
     {
         $rows = [];
-        foreach (GameType::cases() as $type) {
+        foreach ([GameType::RockPaperScissors, GameType::TruthOrDare] as $type) {
             $rows[] = [$this->button($state, Presentation::label($type->value), 'game_type_'.$mode.'_'.$type->value)];
         }
         $rows[] = [$this->button($state, __('Back'), 'games')];
 
-        return $this->message(__('Choose a game.'), $rows);
+        return $this->message(__('🎮 یک بازی انتخاب کن:'), $rows);
     }
 
     private function twoTruthsScreen(User $user, RegistrationState $state, GameSession $session): array
@@ -908,6 +1070,11 @@ class DiscoveryInteraction
             $name = $player->profile->display_name;
             if ($this->guard->blocked($name) || preg_match('/[0-9]{6,}/', $name) || ($player->telegram_username && stripos($name, $player->telegram_username) !== false)) {
                 $name = __('Player');
+            }
+            if ($mode === 'contacts') {
+                $age = $player->profile->age ? Presentation::persianDigits((string) $player->profile->age) : '—';
+                $city = $player->profile->city?->name ?? '—';
+                $name = '👤 '.$name.' | '.$age.' | '.$city.' | '.MitoId::display($player->public_mito_id);
             }
             $rows[] = [$this->button($state, $name, 'profile_'.$player->id.'_game_pick_'.$mode.'_'.$type->value.'_'.$players->currentPage())];
         }
@@ -1196,7 +1363,7 @@ class DiscoveryInteraction
         if ($context['step'] === 'date' || $context['step'] === 'day') {
             try {
                 $start = CarbonImmutable::createFromFormat('Y-m-d H:i', Presentation::asciiDigits($text), app()->getLocale() === 'fa' ? config('presentation.timezone') : config('app.timezone'));
-            } catch (\Throwable) {
+            } catch (\Throwable $e) {
                 $start = null;
             }
             if (! $start || $start->lt(now())) {

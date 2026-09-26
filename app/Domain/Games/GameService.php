@@ -3,10 +3,12 @@
 namespace App\Domain\Games;
 
 use App\Domain\Moderation\RestrictionService;
+use App\Domain\Payments\WalletService;
 use App\Domain\Profiles\ProfileStatus;
 use App\Domain\Telegram\InteractionState;
 use App\Domain\Telegram\SocialNotificationService;
 use App\Domain\Users\BlockService;
+use App\Domain\Users\MitoId;
 use App\Domain\Users\User;
 use App\Domain\Users\UserStatus;
 use Carbon\CarbonImmutable;
@@ -14,9 +16,9 @@ use Illuminate\Support\Facades\DB;
 
 class GameService
 {
-    public function __construct(private readonly BlockService $blocks, private readonly SocialNotificationService $notifications) {}
+    public function __construct(private readonly BlockService $blocks, private readonly SocialNotificationService $notifications, private readonly WalletService $wallets) {}
 
-    public function invite(User $from, User $to, GameType $type): GameSession
+    public function invite(User $from, User $to, GameType $type, string $origin = 'direct_invitation'): GameSession
     {
         app(RestrictionService::class)->authorize($from, 'game_invites_disabled');
         app(GameAvailability::class)->assertEnabled($type);
@@ -26,19 +28,22 @@ class GameService
             throw new \DomainException('This player cannot be invited.');
         }
 
-        return DB::transaction(function () use ($from, $to, $type) {
+        return DB::transaction(function () use ($from, $to, $type, $origin) {
             $duplicate = GameSession::where('game_type', $type)->whereIn('status', [GameStatus::Waiting, GameStatus::Accepted, GameStatus::Active])->where(function ($q) use ($from, $to) {
                 $q->where('created_by', $from->id)->whereHas('participants', fn ($p) => $p->where('users.id', $to->id))->orWhere('created_by', $to->id)->whereHas('participants', fn ($p) => $p->where('users.id', $from->id));
             })->exists();
             if ($duplicate) {
                 throw new \DomainException('An active game already exists.');
             }
-            $session = GameSession::create(['game_type' => $type, 'status' => GameStatus::Waiting, 'created_by' => $from->id, 'expires_at' => now()->addMinutes((int) config('social.game_invitation_expiry_minutes', 30)), 'state' => ['opponent_id' => $to->id]]);
+            $session = GameSession::create(['game_type' => $type, 'origin' => $origin, 'status' => GameStatus::Waiting, 'created_by' => $from->id, 'expires_at' => now()->addMinutes((int) config('social.game_invitation_expiry_minutes', 30)), 'state' => ['opponent_id' => $to->id]]);
             $session->participants()->attach([$from->id, $to->id]);
-            $this->notifications->queue($to, match ($type) {
-                GameType::TwoTruthsOneLie => 'two_truths', GameType::GuessInterest => 'guess_interest', GameType::GuessNumber => 'guess_number', default => 'game_invite'
-            }, $session->id, __('You have a new game invitation.'), 'game_invite:'.$session->id.':'.$to->id,
-                [[['text' => __('Accept game'), 'callback_data' => 'd:0:game_accept_'.$session->id]]]);
+            $label = match ($type) {
+                GameType::RockPaperScissors => 'سنگ، کاغذ، قیچی',
+                GameType::TruthOrDare => 'جرأت یا حقیقت',
+                default => $type->value,
+            };
+            $this->notifications->queue($to, 'game_invite', $session->id, '🎮 شما از کاربر '.MitoId::display($from->public_mito_id).' یک درخواست بازی «'.$label.'» دارید.', 'game_invite:'.$session->id.':'.$to->id,
+                [[['text' => 'قبول', 'callback_data' => 'd:0:game_accept_'.$session->id], ['text' => 'رد', 'callback_data' => 'd:0:game_reject_'.$session->id]]]);
 
             return $session;
         });
@@ -73,6 +78,10 @@ class GameService
             if (! $s->participants()->whereKey($user->id)->exists() || $s->status !== GameStatus::Waiting || ($s->expires_at && $s->expires_at->isPast())) {
                 throw new \DomainException('This game invitation is no longer available.');
             }
+            $cost = (int) (DB::table('coin_feature_prices')->where('feature_code', 'game_invitation')->where('is_active', true)->value('coin_cost') ?? 2);
+            if ($cost > 0) {
+                $this->wallets->debit($s->created_by, $cost, 'game_invitation', ['reference_type' => GameSession::class, 'reference_id' => $s->id, 'idempotency_key' => 'game_invitation:'.$s->id, 'description' => 'Game invitation accepted', 'metadata' => ['session_id' => $s->id, 'requester_user_id' => $s->created_by, 'accepter_user_id' => $user->id, 'amount' => $cost]]);
+            }
             $s->update(['status' => GameStatus::Active, 'state' => array_merge($s->state ?? [], ['started_at' => now()->toIso8601String()])]);
             if ($s->game_type === GameType::TwoTruthsOneLie) {
                 app(TwoTruthsService::class)->start($s);
@@ -98,6 +107,8 @@ class GameService
                 $this->ensureRound($s);
             }
             if ($s->fresh()->status === GameStatus::Active) {
+                $this->notifications->queue($s->creator, 'game_accepted', $s->id, __('درخواست بازی شما قبول شد.'), 'game_accepted:'.$s->id.':requester');
+                $this->notifications->queue($user, 'game_started', $s->id, __('🎉 بازی شروع شد.'), 'game_started:'.$s->id.':accepter');
                 $this->notifyOpen($s->fresh());
             }
         });
